@@ -183,11 +183,10 @@ class SelfAttention(nn.Module):
                 nn.init.normal_(m.weight, std=0.01)
                 nn.init.zeros_(m.bias)
 
-            # V2: texture modulates K/V (and Q with small coeff) via low-rank projections
-            tex_rank = 64
-            self.Wk_tex = nn.Sequential(nn.Linear(embed_dim, tex_rank, bias=False), nn.Linear(tex_rank, embed_dim, bias=False))
-            self.Wv_tex = nn.Sequential(nn.Linear(embed_dim, tex_rank, bias=False), nn.Linear(tex_rank, embed_dim, bias=False))
-            self.Wq_tex = nn.Sequential(nn.Linear(embed_dim, tex_rank, bias=False), nn.Linear(tex_rank, embed_dim, bias=False))
+            # V2: texture modulates K/V (and Q with small coeff) via projections
+            self.Wk_tex = nn.Linear(embed_dim, embed_dim, bias=False)
+            self.Wv_tex = nn.Linear(embed_dim, embed_dim, bias=False)
+            self.Wq_tex = nn.Linear(embed_dim, embed_dim, bias=False)
             self.tex_q_coeff = 0.3  # Q gets smaller texture modulation
 
             print(f"  [Texture Layer {block_idx}] init_gate_logit={init_logit:.3f} "
@@ -206,7 +205,7 @@ class SelfAttention(nn.Module):
                     num_scales=memory_num_scales,
                     shared_patterns=8,
                     shared_memory_size=4,
-                    cat_rank=8,
+                    cat_rank=16,
                     block_idx=block_idx,
                     depth=depth,
                 )

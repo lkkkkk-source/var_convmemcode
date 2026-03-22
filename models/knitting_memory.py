@@ -53,10 +53,9 @@ class KnittingPatternMemory(nn.Module):
         self.key_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.value_proj = nn.Linear(embed_dim, embed_dim, bias=False)
 
-        # 3. K/V 输出投影 + 门控 (低秩)
-        mem_rank = 64
-        self.Wk_mem = nn.Sequential(nn.Linear(embed_dim, mem_rank), nn.Linear(mem_rank, embed_dim))
-        self.Wv_mem = nn.Sequential(nn.Linear(embed_dim, mem_rank), nn.Linear(mem_rank, embed_dim))
+        # 3. K/V 输出投影 + 门控
+        self.Wk_mem = nn.Linear(embed_dim, embed_dim)
+        self.Wv_mem = nn.Linear(embed_dim, embed_dim)
 
         if depth > 1:
             init_logit = -2.0 + (block_idx / (depth - 1)) * 2.0

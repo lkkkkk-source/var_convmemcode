@@ -37,7 +37,7 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         num_scales: int = 10,
         shared_patterns: int = 8,
         shared_memory_size: int = 4,
-        cat_rank: int = 8,
+        cat_rank: int = 16,
         block_idx: int = 0,
         depth: int = 16,
     ):
@@ -88,18 +88,17 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         # ==================== 6. Alpha 融合门 (轻量化) ====================
         # alpha = sigmoid(MLP([mean(q), scale_embed, class_embed]))
         self.alpha_mlp = nn.Sequential(
-            nn.Linear(3 * embed_dim, 128),
+            nn.Linear(3 * embed_dim, embed_dim),
             nn.GELU(),
-            nn.Linear(128, 1),
+            nn.Linear(embed_dim, 1),
         )
         # Init to slightly favor shared (output ~0 -> alpha ~0.5, but we bias towards shared)
         nn.init.zeros_(self.alpha_mlp[-1].weight)
         nn.init.constant_(self.alpha_mlp[-1].bias, -1.0)  # sigmoid(-1) ≈ 0.27
 
-        # ==================== 7. K/V 输出投影 + 门控 (低秩) ====================
-        mem_rank = 64
-        self.Wk_mem = nn.Sequential(nn.Linear(embed_dim, mem_rank), nn.Linear(mem_rank, embed_dim))
-        self.Wv_mem = nn.Sequential(nn.Linear(embed_dim, mem_rank), nn.Linear(mem_rank, embed_dim))
+        # ==================== 7. K/V 输出投影 + 门控 ====================
+        self.Wk_mem = nn.Linear(embed_dim, embed_dim)
+        self.Wv_mem = nn.Linear(embed_dim, embed_dim)
 
         # Per-K/V scalar gates, init small
         if depth > 1:
