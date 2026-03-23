@@ -72,6 +72,7 @@ class VARTrainer(object):
         self.entropy_monitor = None
         self._captured_hidden_states = {}  # layer_idx -> tensor, captured via hooks
         self._hooks = []
+        self._capture_enabled = False  # Only enable near logging steps to avoid per-step detach overhead
         if hasattr(var_wo_ddp, 'blocks'):
             has_memory = any(hasattr(b.attn, 'knitting_memory') for b in var_wo_ddp.blocks)
             if has_memory:
@@ -87,9 +88,10 @@ class VARTrainer(object):
     def _make_capture_hook(self, layer_idx):
         """Create a forward hook that captures the input to a SelfAttention layer."""
         def hook_fn(module, input, output):
+            if not self._capture_enabled:
+                return
             # input[0] is x (the normalized hidden state passed to SelfAttention.forward)
             if isinstance(input, tuple) and len(input) > 0:
-                # Only capture occasionally to avoid memory overhead
                 self._captured_hidden_states[layer_idx] = input[0].detach()
         return hook_fn
     
@@ -150,6 +152,9 @@ class VARTrainer(object):
         x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
         
         with self.var_opt.amp_ctx:
+            # Enable entropy capture only near tensorboard logging steps (every 500)
+            self._capture_enabled = (self.entropy_monitor is not None and
+                                     (g_it == 0 or (g_it + 1) % 500 == 0))
             # NOTE: category_ids=label_B assumes num_classes == num_categories.
             # If your dataset has different class/category counts, add a mapping here.
             logits_BLV, aux_cls_loss = self.var(label_B, x_BLCv_wo_first_l, category_ids=label_B)

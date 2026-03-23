@@ -83,6 +83,8 @@ class Args(Tap):
     saln: bool = False      # whether to use shared adaln
     anorm: bool = True      # whether to use L2 normalized attention
     fuse: bool = True       # whether to use fused op like flash attn, xformers, fused MLP, fused LayerNorm, etc.
+    drop: float = 0.0       # dropout rate for FFN and attention
+    drop_path: float = 0.0  # drop path rate (0=auto: 0.1*depth/24)
 
     # Axial texture enhancement
     tex: bool = False       # whether to enable axial texture enhancement
@@ -109,6 +111,9 @@ class Args(Tap):
 
     # Data augmentation
     cyclic_shift: bool = False     # enable cyclic shift augmentation for periodic patterns
+    vflip: bool = False            # vertical flip augmentation
+    rand_rot: bool = False         # random 90/180/270 rotation augmentation
+    color_jitter: float = 0.0     # color jitter strength (0=off, 0.1=mild)
 
     # data
     pn: str = '1_2_3_4_5_6_8_10_13_16'

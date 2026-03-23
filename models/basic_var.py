@@ -221,6 +221,9 @@ class SelfAttention(nn.Module):
                     depth=depth,
                 )
 
+        # Pre-computed texture execution plan (lazily built on first forward)
+        self._texture_plan = None if enable_texture else []
+
     def kv_caching(self, enable: bool):
         self.caching, self.cached_k, self.cached_v = enable, None, None
 
@@ -250,6 +253,47 @@ class SelfAttention(nn.Module):
 
         return op(x)
 
+    def _validate_padding(self, op, pn: int) -> bool:
+        """Check if circular padding is valid for spatial size pn. Called once at plan build time."""
+        for m in op.modules():
+            if isinstance(m, nn.Conv2d) and m.padding_mode == 'circular':
+                pad_h, pad_w = m.padding if isinstance(m.padding, tuple) else (m.padding, m.padding)
+                if pn <= pad_h or pn <= pad_w:
+                    return False
+        return True
+
+    def _build_texture_plan(self, begin_ends):
+        """Build static execution plan on first forward. Maps each scale to pre-validated ops."""
+        self._texture_plan = []
+        for start_idx, end_idx in begin_ends:
+            scale_len = end_idx - start_idx
+            pn = int(math.sqrt(scale_len))
+            if pn * pn != scale_len or pn < 2:
+                self._texture_plan.append(None)
+                continue
+
+            active_kernels = _get_active_kernels(pn, self.texture_scales)
+            if not active_kernels:
+                self._texture_plan.append(None)
+                continue
+
+            row_plan, col_plan, diag_plan = [], [], []
+            for idx, k in enumerate(self.texture_scales):
+                if k not in active_kernels:
+                    continue
+                op_key = self._select_op_key(k, pn)
+                if op_key in self.row_ops and self._validate_padding(self.row_ops[op_key], pn):
+                    row_plan.append((self.row_ops[op_key], idx))
+                if op_key in self.col_ops and self._validate_padding(self.col_ops[op_key], pn):
+                    col_plan.append((self.col_ops[op_key], idx))
+                if op_key in self.diag_ops and self._validate_padding(self.diag_ops[op_key], pn):
+                    diag_plan.append((self.diag_ops[op_key], idx))
+
+            if not (row_plan or col_plan or diag_plan):
+                self._texture_plan.append(None)
+                continue
+            self._texture_plan.append((pn, start_idx, end_idx, row_plan, col_plan, diag_plan))
+
     def _compute_texture_modulation(
         self,
         x_BLC: torch.Tensor,
@@ -267,23 +311,16 @@ class SelfAttention(nn.Module):
 
         tex_output = torch.zeros(B, H, L, c, device=x_BLC.device, dtype=x_BLC.dtype)
 
-        for start_idx, end_idx in begin_ends:
+        # Build execution plan on first call (lazy init)
+        if self._texture_plan is None:
+            self._build_texture_plan(begin_ends)
+
+        for plan_entry in self._texture_plan:
+            if plan_entry is None:
+                continue
+            pn, start_idx, end_idx, row_plan, col_plan, diag_plan = plan_entry
+
             if end_idx > L:
-                continue
-            scale_len = end_idx - start_idx
-            if scale_len <= 0:
-                continue
-            pn = int(math.sqrt(scale_len))
-            if pn * pn != scale_len:
-                continue
-
-            # Skip small spatial sizes to avoid circular padding issues
-            if pn < 2:
-                continue
-
-            # Determine active kernels for this scale
-            active_kernels = _get_active_kernels(pn, self.texture_scales)
-            if len(active_kernels) == 0:
                 continue
 
             scale_tokens = x_heads[:, :, start_idx:end_idx, :]  # [B, H, pn*pn, c]
@@ -295,40 +332,15 @@ class SelfAttention(nn.Module):
                 scale_2d = scale_tokens.reshape(B, H, pn, pn, c)
                 scale_2d = scale_2d.permute(0, 1, 4, 2, 3).reshape(B * H, c, pn, pn)
 
-            # Collect features from all three branches
-            row_features, col_features, diag_features = [], [], []
-            valid_row_idx, valid_col_idx, valid_diag_idx = [], [], []
+            # Execute pre-validated ops directly (no runtime padding checks)
+            row_features = [op(scale_2d)[:, :, :pn, :pn] for op, _ in row_plan]
+            row_indices = [idx for _, idx in row_plan]
+            col_features = [op(scale_2d)[:, :, :pn, :pn] for op, _ in col_plan]
+            col_indices = [idx for _, idx in col_plan]
+            diag_features = [op(scale_2d)[:, :, :pn, :pn] for op, _ in diag_plan]
+            diag_indices = [idx for _, idx in diag_plan]
 
-            for idx, k in enumerate(self.texture_scales):
-                if k not in active_kernels:
-                    continue
-                op_key = self._select_op_key(k, pn)
-
-                if op_key in self.row_ops:
-                    feat = self._safe_apply_conv_seq(self.row_ops[op_key], scale_2d)
-                    if feat is not None:
-                        if feat.shape[2:] != (pn, pn):
-                            feat = feat[:, :, :pn, :pn]
-                        row_features.append(feat)
-                        valid_row_idx.append(idx)
-
-                if op_key in self.col_ops:
-                    feat = self._safe_apply_conv_seq(self.col_ops[op_key], scale_2d)
-                    if feat is not None:
-                        if feat.shape[2:] != (pn, pn):
-                            feat = feat[:, :, :pn, :pn]
-                        col_features.append(feat)
-                        valid_col_idx.append(idx)
-
-                if op_key in self.diag_ops:
-                    feat = self._safe_apply_conv_seq(self.diag_ops[op_key], scale_2d)
-                    if feat is not None:
-                        if feat.shape[2:] != (pn, pn):
-                            feat = feat[:, :, :pn, :pn]
-                        diag_features.append(feat)
-                        valid_diag_idx.append(idx)
-
-            if len(row_features) == 0 and len(col_features) == 0 and len(diag_features) == 0:
+            if not (row_features or col_features or diag_features):
                 continue
 
             # Compute global feature for gating
@@ -348,9 +360,9 @@ class SelfAttention(nn.Module):
                 stacked = torch.stack(features, dim=1)
                 return (stacked * weights).sum(dim=1)
 
-            row_mix = _weighted_mix(row_features, valid_row_idx, self.row_gates)
-            col_mix = _weighted_mix(col_features, valid_col_idx, self.col_gates)
-            diag_mix = _weighted_mix(diag_features, valid_diag_idx, self.diag_gates)
+            row_mix = _weighted_mix(row_features, row_indices, self.row_gates)
+            col_mix = _weighted_mix(col_features, col_indices, self.col_gates)
+            diag_mix = _weighted_mix(diag_features, diag_indices, self.diag_gates)
 
             # Combine: row + col + diag
             enhanced_2d = row_mix + col_mix + diag_mix

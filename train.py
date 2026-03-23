@@ -43,6 +43,9 @@ def build_everything(args: arg_util.Args):
         num_classes, dataset_train, dataset_val = build_dataset(
             args.data_path, final_reso=args.data_load_reso, hflip=args.hflip, mid_reso=args.mid_reso,
             cyclic_shift=args.cyclic_shift,
+            vflip=args.vflip,
+            rand_rot=args.rand_rot,
+            color_jitter=args.color_jitter,
         )
         types = str((type(dataset_train).__name__, type(dataset_val).__name__))
         
@@ -90,6 +93,7 @@ def build_everything(args: arg_util.Args):
         num_classes=num_classes, depth=args.depth, shared_aln=args.saln, attn_l2_norm=args.anorm,
         flash_if_available=args.fuse, fused_if_available=args.fuse,
         init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, init_std=args.ini,
+        drop_rate=args.drop, attn_drop_rate=args.drop, drop_path_rate=args.drop_path,
         # Axial texture enhancement
         enable_texture=args.tex,
         texture_scales=list(map(int, args.tex_scales.replace('-', '_').split('_'))) if args.tex else [3, 5, 7, 11],

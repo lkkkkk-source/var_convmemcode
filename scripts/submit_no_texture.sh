@@ -15,20 +15,26 @@ python --version
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 cd /share/home/u2415063010/myproject/var_convmemcode
 
-torchrun --nproc_per_node=4 --master_port=18555 train.py \
+torchrun --nproc_per_node=4 --master_port=18557 train.py \
 	--data_path=./dataset_v3_patches \
-	--exp_name=no_texture \
-	--bs=32 \
-	--depth=16 \
-	--ep=1000 \
+	--exp_name=no_texture_d12 \
+	--bs=16 \
+	--depth=12 \
+	--ep=250 \
 	--fp16=1 \
 	--alng=1e-3 \
 	--wpe=0.1 \
 	--twde=0.05 \
+	--twd=0.08 \
 	--hflip=True \
+	--vflip=True \
+	--rand_rot=True \
+	--cyclic_shift=True \
+	--ls=0.1 \
+	--drop=0.1 \
 	--workers=5 \
 	--mem=1 \
-	--mem_layers=8_12 \
+	--mem_layers=6_9 \
 	--mem_class_aware=1 \
 	--mem_num_categories=6 \
 	--mem_patterns=4 \
@@ -36,7 +42,7 @@ torchrun --nproc_per_node=4 --master_port=18555 train.py \
 	--mem_div_weight=0.01 \
 	--mem_temp_warmup=50 \
 	--aux_cls_weight=0.10 \
-	--aux_tap_layer=4 \
+	--aux_tap_layer=3 \
 	--seam_weight=0.02 \
 	--seam_warmup=10 \
 	--slot_sep_weight=0.001

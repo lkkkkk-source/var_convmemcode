@@ -124,6 +124,14 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         self._last_collapse_ratio = 0.0
         self._last_avg_num_slots = 0.0
 
+        # Pre-computed visible indices per scale (causal: scale i sees [0..i])
+        self._visible_indices_list = [list(range(i + 1)) for i in range(num_scales)]
+
+        # Slot sep loss cache (recompute every N steps to save 320x320 matmul)
+        self._slot_sep_cache = None
+        self._forward_count = 0
+        self._slot_sep_interval = 10
+
         # Stats
         total_shared_params = num_scales * shared_patterns * shared_memory_size * embed_dim
         total_cat_params = num_categories * num_scales * cat_rank + num_scales * cat_rank * self.slots_per_scale * embed_dim
@@ -191,6 +199,48 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         attn = F.softmax(scores / temp, dim=-1)
         return torch.matmul(attn, values), attn  # [B, seq_len, C], [B, seq_len, num_slots]
 
+    def _retrieve_batched(self, q: torch.Tensor, keys: torch.Tensor, values: torch.Tensor, temp: float):
+        """
+        Batched retrieval: each sample has its own key/value set.
+
+        Args:
+            q: [B, seq_len, C]
+            keys: [B, num_slots, C]
+            values: [B, num_slots, C]
+            temp: temperature scalar
+        """
+        scale_factor = 1.0 / math.sqrt(self.embed_dim)
+        scores = torch.bmm(q, keys.transpose(1, 2)) * scale_factor  # [B, seq_len, num_slots]
+        attn = F.softmax(scores / temp, dim=-1)
+        return torch.bmm(attn, values), attn
+
+    def _get_cat_memory_batched(self, cat_ids: torch.Tensor, visible_indices: list) -> torch.Tensor:
+        """
+        Batch compute category memories for multiple categories across visible scales.
+
+        Args:
+            cat_ids: [U] unique category ids (all valid, >= 0)
+            visible_indices: list of scale indices [0, 1, ..., i]
+
+        Returns: [U, total_visible_slots, C]
+        """
+        V = len(visible_indices)
+        vis_idx = torch.tensor(visible_indices, device=self.cat_B.device, dtype=torch.long)
+
+        # Batched low-rank: cat_A[cats, vis]: [U, V, R], cat_B[vis]: [V, R, S*C]
+        a = self.cat_A[cat_ids][:, vis_idx]   # [U, V, R]
+        b = self.cat_B[vis_idx]               # [V, R, S*C]
+        delta = torch.einsum('uvr,vrd->uvd', a, b)  # [U, V, S*C]
+        delta = delta.view(len(cat_ids), V, self.slots_per_scale, self.embed_dim)  # [U, V, S, C]
+
+        # Add shared base
+        shared_vis = torch.stack([
+            self.shared_memory[f'scale_{j}'].view(self.slots_per_scale, self.embed_dim)
+            for j in visible_indices
+        ])  # [V, S, C]
+        cat_mem = shared_vis.unsqueeze(0) + delta  # [U, V, S, C]
+        return cat_mem.reshape(len(cat_ids), V * self.slots_per_scale, self.embed_dim)  # [U, V*S, C]
+
     def forward(
         self,
         x: torch.Tensor,
@@ -220,13 +270,12 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         # 1. 预计算 Query
         query = self.query_proj(x)  # [B, L, C]
 
-        # 2. 预计算共享记忆 K/V (所有尺度)
-        shared_keys = []
-        shared_values = []
-        for i in range(num_scales):
-            mem_flat = self.shared_memory[f'scale_{i}'].view(-1, C)  # [slots, C]
-            shared_keys.append(self.key_proj(mem_flat))
-            shared_values.append(self.value_proj(mem_flat))
+        # 2. 预计算共享记忆 K/V (所有尺度, 单次批量调用)
+        shared_mem_stacked = torch.stack([
+            self.shared_memory[f'scale_{i}'].view(-1, C) for i in range(num_scales)
+        ])  # [num_scales, slots_per_scale, C]
+        shared_keys_all = self.key_proj(shared_mem_stacked)    # [num_scales, slots, C]
+        shared_values_all = self.value_proj(shared_mem_stacked)  # [num_scales, slots, C]
 
         # 3. 确定是否使用类别记忆
         use_category = category_ids is not None
@@ -246,10 +295,10 @@ class ClassAwareKnittingMemoryV2(nn.Module):
 
             q_scale = query[:, start:end, :]  # [B, scale_len, C]
 
-            # 5. 获取可见的共享 K/V
-            visible_indices = torch.where(self.slot_visibility[i])[0]
-            k_shared = torch.cat([shared_keys[j] for j in visible_indices], dim=0)
-            v_shared = torch.cat([shared_values[j] for j in visible_indices], dim=0)
+            # 5. 获取可见的共享 K/V (pre-computed indices)
+            visible_indices = self._visible_indices_list[i]
+            k_shared = shared_keys_all[:i+1].reshape(-1, C)    # [(i+1)*slots, C]
+            v_shared = shared_values_all[:i+1].reshape(-1, C)  # [(i+1)*slots, C]
 
             # 6. 共享分支检索
             o_shared, attn_shared = self._retrieve(q_scale, k_shared, v_shared, temp)
@@ -257,47 +306,38 @@ class ClassAwareKnittingMemoryV2(nn.Module):
 
             all_attn_weights.append((i, attn_shared))
 
-            # 7. 类别分支检索 (如果有有效类别)
+            # 7. 类别分支检索 (批量向量化，消除逐样本循环)
             if has_valid_category:
-                # 逐样本处理类别记忆 (因为每个样本的类别不同)
-                o_cat_list = []
-                alpha_list = []
+                valid_mask = (category_ids >= 0)  # [B]
+                safe_cat_ids = category_ids.clamp(min=0)  # [B], invalid→0 as dummy
 
-                for b_idx in range(B):
-                    cat_id = category_ids[b_idx].item()
-                    q_b = q_scale[b_idx:b_idx + 1]  # [1, scale_len, C]
+                # 找唯一类别，批量计算低秩记忆
+                unique_cats, inverse_idx = torch.unique(safe_cat_ids, return_inverse=True)
 
-                    if cat_id < 0 or cat_id >= self.num_categories:
-                        # 无效类别: alpha=0, 只用 shared
-                        o_cat_list.append(torch.zeros_like(q_b))
-                        alpha_list.append(torch.zeros(1, scale_len, 1, device=device, dtype=q_b.dtype))
-                        continue
+                # 批量: low-rank delta + shared → project K/V
+                cat_mem_all = self._get_cat_memory_batched(unique_cats, visible_indices)  # [U, V*S, C]
+                k_cat_all = self.key_proj(cat_mem_all)    # [U, V*S, C]
+                v_cat_all = self.value_proj(cat_mem_all)  # [U, V*S, C]
 
-                    # 获取该类别的有效记忆 (shared + low-rank delta)
-                    cat_keys_list = []
-                    cat_values_list = []
-                    for j in visible_indices:
-                        cat_mem = self._get_cat_memory(cat_id, j.item())  # [slots, C]
-                        cat_keys_list.append(self.key_proj(cat_mem))
-                        cat_values_list.append(self.value_proj(cat_mem))
+                # 按样本映射到各自类别的 K/V
+                k_cat = k_cat_all[inverse_idx]  # [B, V*S, C]
+                v_cat = v_cat_all[inverse_idx]  # [B, V*S, C]
 
-                    k_cat = torch.cat(cat_keys_list, dim=0)
-                    v_cat = torch.cat(cat_values_list, dim=0)
+                # 批量 attention
+                o_cat, _ = self._retrieve_batched(q_scale, k_cat, v_cat, temp)  # [B, scale_len, C]
 
-                    o_cat_b, _ = self._retrieve(q_b, k_cat, v_cat, temp)
-                    o_cat_list.append(o_cat_b)
+                # 批量 alpha 门控
+                q_mean = q_scale.mean(dim=1)  # [B, C]
+                scale_emb = self.scale_embedding(
+                    torch.tensor(i, device=device)
+                ).unsqueeze(0).expand(B, -1)  # [B, C]
+                class_emb = self.category_embedding(safe_cat_ids)  # [B, C]
+                gate_input = torch.cat([q_mean, scale_emb, class_emb], dim=-1)  # [B, 3*C]
+                alpha = torch.sigmoid(self.alpha_mlp(gate_input))  # [B, 1]
+                alpha = alpha.unsqueeze(1).expand(B, scale_len, 1)  # [B, scale_len, 1]
 
-                    # 计算 alpha: sigmoid(MLP([mean(q), scale_embed, class_embed]))
-                    q_mean = q_b.mean(dim=1)  # [1, C]
-                    scale_emb = self.scale_embedding(torch.tensor(i, device=device)).unsqueeze(0)  # [1, C]
-                    class_emb = self.category_embedding(torch.tensor(cat_id, device=device)).unsqueeze(0)  # [1, C]
-                    gate_input = torch.cat([q_mean, scale_emb, class_emb], dim=-1)  # [1, 3*C]
-                    alpha_b = torch.sigmoid(self.alpha_mlp(gate_input))  # [1, 1]
-                    alpha_b = alpha_b.unsqueeze(1).expand(1, scale_len, 1)  # [1, scale_len, 1]
-                    alpha_list.append(alpha_b)
-
-                o_cat = torch.cat(o_cat_list, dim=0)  # [B, scale_len, C]
-                alpha = torch.cat(alpha_list, dim=0)  # [B, scale_len, 1]
+                # 无效类别 alpha 置0 (等价于原始的 zeros 分支)
+                alpha = alpha * valid_mask.float().view(B, 1, 1)
 
                 # 融合: mem = (1 - alpha) * o_shared + alpha * o_cat
                 mem_scale = (1.0 - alpha) * o_shared + alpha * o_cat
@@ -318,9 +358,14 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         else:
             diversity_loss = torch.tensor(0.0, device=device)
 
-        # 10. Slot separation loss
+        # 10. Slot separation loss (cached, recomputed every N steps)
         if self.training:
-            slot_sep_loss = self._compute_slot_sep_loss()
+            self._forward_count += 1
+            if self._slot_sep_cache is None or self._forward_count % self._slot_sep_interval == 0:
+                slot_sep_loss = self._compute_slot_sep_loss()
+                self._slot_sep_cache = slot_sep_loss
+            else:
+                slot_sep_loss = self._slot_sep_cache.detach()
         else:
             slot_sep_loss = torch.tensor(0.0, device=device)
 

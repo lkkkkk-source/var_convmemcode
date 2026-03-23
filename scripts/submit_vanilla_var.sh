@@ -17,13 +17,19 @@ cd /share/home/u2415063010/myproject/var_convmemcode
 
 torchrun --nproc_per_node=4 --master_port=18555 train.py \
 	--data_path=./dataset_v3_patches \
-	--exp_name=vanilla_var \
-	--bs=32 \
-	--depth=16 \
-	--ep=1000 \
+	--exp_name=vanilla_var_d12 \
+	--bs=16 \
+	--depth=12 \
+	--ep=250 \
 	--fp16=1 \
 	--alng=1e-3 \
 	--wpe=0.1 \
 	--twde=0.05 \
+	--twd=0.08 \
 	--hflip=True \
+	--vflip=True \
+	--rand_rot=True \
+	--cyclic_shift=True \
+	--ls=0.1 \
+	--drop=0.1 \
 	--workers=5
