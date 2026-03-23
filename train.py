@@ -120,6 +120,82 @@ def build_everything(args: arg_util.Args):
     dist.barrier()
     vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
     
+    # ========== Load pretrained VAR weights (e.g., from ImageNet) ==========
+    has_auto_resumed = len(auto_resume_info) > 0 and 'success' in auto_resume_info[-1]
+    if args.pretrained_ckpt and has_auto_resumed:
+        # Skip if auto_resume already loaded a checkpoint (continuing training)
+        print(f'[pretrained] Skipping pretrained loading: auto_resume already loaded a checkpoint')
+    elif args.pretrained_ckpt:
+        print(f'[pretrained] Loading pretrained VAR from {args.pretrained_ckpt} ...')
+        pretrained_state = torch.load(args.pretrained_ckpt, map_location='cpu')
+
+        # Handle checkpoint format: could be raw state_dict or wrapped in 'trainer'/'var_wo_ddp'
+        if 'trainer' in pretrained_state and 'var_wo_ddp' in pretrained_state['trainer']:
+            pt_sd = pretrained_state['trainer']['var_wo_ddp']
+        elif 'var_wo_ddp' in pretrained_state:
+            pt_sd = pretrained_state['var_wo_ddp']
+        elif 'state_dict' in pretrained_state:
+            pt_sd = pretrained_state['state_dict']
+        else:
+            # Assume it's a raw state_dict
+            pt_sd = pretrained_state
+
+        model_sd = var_wo_ddp.state_dict()
+
+        # Filter: skip mismatched shapes (e.g., class_emb, aux_cls_head, new modules)
+        loaded_keys = []
+        skipped_keys = []
+        for k, v in pt_sd.items():
+            if k in model_sd and model_sd[k].shape == v.shape:
+                model_sd[k] = v
+                loaded_keys.append(k)
+            else:
+                skipped_keys.append(k)
+
+        # Find keys in model but not in pretrained (new modules)
+        new_keys = [k for k in model_sd if k not in pt_sd]
+
+        var_wo_ddp.load_state_dict(model_sd, strict=True)
+        print(f'[pretrained] Loaded {len(loaded_keys)}/{len(pt_sd)} keys from pretrained checkpoint')
+        if skipped_keys:
+            print(f'[pretrained] Skipped (shape mismatch): {skipped_keys[:20]}{"..." if len(skipped_keys) > 20 else ""}')
+        if new_keys:
+            print(f'[pretrained] New (randomly init): {new_keys[:20]}{"..." if len(new_keys) > 20 else ""}')
+        del pretrained_state, pt_sd
+
+    # ========== Freeze layers for fine-tuning ==========
+    if args.freeze_layers:
+        parts = list(map(int, args.freeze_layers.replace('-', '_').split('_')))
+        if len(parts) == 2:
+            freeze_start, freeze_end = parts[0], parts[1]
+        elif len(parts) == 1:
+            freeze_start, freeze_end = 0, parts[0]
+        else:
+            raise ValueError(f'--freeze_layers format: start_end (e.g., 0_7) or single number (e.g., 7)')
+
+        frozen_count = 0
+        for i in range(freeze_start, min(freeze_end + 1, len(var_wo_ddp.blocks))):
+            for param in var_wo_ddp.blocks[i].parameters():
+                param.requires_grad = False
+                frozen_count += 1
+
+        # Also freeze shared embeddings if freezing from layer 0
+        if freeze_start == 0:
+            for param in var_wo_ddp.word_embed.parameters():
+                param.requires_grad = False
+                frozen_count += 1
+            for param in [var_wo_ddp.pos_1LC, var_wo_ddp.pos_start]:
+                param.requires_grad = False
+                frozen_count += 1
+            for param in var_wo_ddp.lvl_embed.parameters():
+                param.requires_grad = False
+                frozen_count += 1
+
+        trainable = sum(p.numel() for p in var_wo_ddp.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in var_wo_ddp.parameters())
+        print(f'[freeze] Froze layers {freeze_start}-{freeze_end} ({frozen_count} params)')
+        print(f'[freeze] Trainable: {trainable/1e6:.2f}M / {total/1e6:.2f}M ({100*trainable/total:.1f}%)')
+
     vae_local: VQVAE = args.compile_model(vae_local, args.vfast)
     var_wo_ddp: VAR = args.compile_model(var_wo_ddp, args.tfast)
     # Note: find_unused_parameters=True is needed because:
@@ -237,6 +313,39 @@ def build_everything(args: arg_util.Args):
     else:
         # Normal parameter grouping (no memory)
         final_para_groups = para_groups
+
+    # Apply fine-tuning lr scale to backbone parameters
+    if args.pretrained_ckpt and args.finetune_lr_scale != 1.0:
+        # Identify new module parameters (texture, memory, class_emb, aux_cls)
+        new_param_ids = set()
+        for name, param in var_wo_ddp.named_parameters():
+            if any(kw in name for kw in ('knitting_memory', 'gabor_texture', 'texture_conv',
+                                          'class_emb', 'aux_cls_head', 'Wk_tex', 'Wv_tex', 'Wq_tex',
+                                          'Wk_mem', 'Wv_mem', 'alpha_mlp', 'gate_logit')):
+                new_param_ids.add(id(param))
+
+        for group in final_para_groups:
+            backbone_params = []
+            new_params = []
+            for p in group['params']:
+                if id(p) in new_param_ids:
+                    new_params.append(p)
+                else:
+                    backbone_params.append(p)
+
+            if backbone_params and new_params:
+                # Split group: backbone gets scaled lr, new modules get full lr
+                group['params'] = new_params  # keep original lr for new modules
+                final_para_groups.append({
+                    'params': backbone_params,
+                    'lr_sc': group.get('lr_sc', 1.0) * args.finetune_lr_scale,
+                    'wd_sc': group.get('wd_sc', 1.0),
+                })
+            elif backbone_params:
+                # All backbone params
+                group['lr_sc'] = group.get('lr_sc', 1.0) * args.finetune_lr_scale
+
+        print(f'[finetune] Backbone lr scale: {args.finetune_lr_scale}x')
 
     # Build optimizer
     opt_clz = {

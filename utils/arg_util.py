@@ -107,6 +107,11 @@ class Args(Tap):
     slot_sep_weight: float = 0.001 # slot separation loss weight
     aux_tap_layer: int = 4         # which layer to tap for aux classification
 
+    # Fine-tuning from pretrained
+    pretrained_ckpt: str = ''      # path to pretrained VAR checkpoint (e.g., ImageNet pretrained)
+    freeze_layers: str = ''        # layers to freeze, e.g., '0_7' freezes layers 0-7 (inclusive)
+    finetune_lr_scale: float = 0.1 # lr scale for backbone (non-new) parameters during fine-tuning
+
     # Data augmentation
     cyclic_shift: bool = False     # enable cyclic shift augmentation for periodic patterns
 

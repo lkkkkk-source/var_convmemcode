@@ -104,5 +104,6 @@ def filter_params(model, nowd_keys=()) -> Tuple[
             print(f'[get_param_groups][rank{dist.get_rank()}] {type(model).__name__=} {count=}, {numel=}', flush=True, force=True)
     print('')
     
-    assert len(names_no_grad) == 0, f'[get_param_groups] names_no_grad = \n{pformat(names_no_grad, indent=2, width=240)}\n'
+    if len(names_no_grad) > 0:
+        print(f'[get_param_groups] {len(names_no_grad)} frozen params (no grad): {names_no_grad[:10]}{"..." if len(names_no_grad) > 10 else ""}')
     return names, paras, list(para_groups.values())
