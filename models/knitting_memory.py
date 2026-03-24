@@ -78,6 +78,14 @@ class KnittingPatternMemory(nn.Module):
         self.last_diversity_loss = torch.tensor(0.0)
         self.last_slot_sep_loss = torch.tensor(0.0)
 
+        # Slot sep loss cache
+        self._slot_sep_cache = None
+        self._forward_count = 0
+        self._slot_sep_interval = 10
+
+        # Pre-computed visible indices
+        self._visible_indices_list = [list(range(i + 1)) for i in range(num_scales)]
+
         # Compat: kept for checkpoint loading
         self.register_buffer('residual_scale', torch.tensor(1.0))
 
@@ -130,12 +138,12 @@ class KnittingPatternMemory(nn.Module):
 
         query = self.query_proj(x)
 
-        all_keys = []
-        all_values = []
-        for i in range(num_scales):
-            mem_flat = self.memory_per_scale[f'scale_{i}'].view(-1, C)
-            all_keys.append(self.key_proj(mem_flat))
-            all_values.append(self.value_proj(mem_flat))
+        # Batch K/V projection: single call instead of N separate calls
+        mem_stacked = torch.stack([
+            self.memory_per_scale[f'scale_{i}'].view(-1, C) for i in range(num_scales)
+        ])  # [num_scales, slots, C]
+        all_keys = self.key_proj(mem_stacked)    # [num_scales, slots, C]
+        all_values = self.value_proj(mem_stacked)  # [num_scales, slots, C]
 
         mem_combined = torch.zeros_like(x)
         all_attn_weights = []
@@ -148,9 +156,9 @@ class KnittingPatternMemory(nn.Module):
                 continue
 
             q_scale = query[:, start:end, :]
-            visible_indices = torch.where(self.slot_visibility[i])[0]
-            k_visible = torch.cat([all_keys[j] for j in visible_indices], dim=0)
-            v_visible = torch.cat([all_values[j] for j in visible_indices], dim=0)
+            # Pre-computed visible indices (causal: scale i sees [0..i])
+            k_visible = all_keys[:i+1].reshape(-1, C)    # [(i+1)*slots, C]
+            v_visible = all_values[:i+1].reshape(-1, C)   # [(i+1)*slots, C]
 
             scale_factor = 1.0 / math.sqrt(C)
             scores = torch.matmul(q_scale, k_visible.T) * scale_factor
@@ -172,9 +180,14 @@ class KnittingPatternMemory(nn.Module):
         else:
             diversity_loss = torch.tensor(0.0, device=device)
 
-        # Slot separation loss
+        # Slot separation loss (cached)
         if self.training:
-            slot_sep_loss = self._compute_slot_sep_loss()
+            self._forward_count += 1
+            if self._slot_sep_cache is None or self._forward_count % self._slot_sep_interval == 0:
+                slot_sep_loss = self._compute_slot_sep_loss()
+                self._slot_sep_cache = slot_sep_loss
+            else:
+                slot_sep_loss = self._slot_sep_cache.detach()
         else:
             slot_sep_loss = torch.tensor(0.0, device=device)
 
