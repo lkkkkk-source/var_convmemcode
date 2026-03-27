@@ -111,12 +111,20 @@ def build_everything(args: arg_util.Args):
         aux_cls_tap_layer=args.aux_tap_layer,
     )
     
-    vae_ckpt = '../model_path/vae_ch160v4096z32.pth'
+    vae_ckpt = './model_path/vae_ch160v4096z32.pth'
+    vae_url = 'https://huggingface.co/FoundationVision/var/resolve/main/vae_ch160v4096z32.pth'
     if dist.is_local_master():
-        if not os.path.exists(vae_ckpt):
+        os.makedirs(os.path.dirname(vae_ckpt), exist_ok=True)
+        need_download = (not os.path.exists(vae_ckpt)) or os.path.getsize(vae_ckpt) == 0
+        if not need_download:
+            try:
+                torch.load(vae_ckpt, map_location='cpu')
+            except Exception:
+                need_download = True
+        if need_download:
             try:
                 subprocess.run(
-                    ['wget', '-q', f'https://huggingface.co/FoundationVision/var/resolve/main/{vae_ckpt}'],
+                    ['wget', '-q', '-O', vae_ckpt, vae_url],
                     check=True
                 )
             except subprocess.CalledProcessError as e:
