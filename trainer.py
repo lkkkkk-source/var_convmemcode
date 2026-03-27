@@ -217,7 +217,7 @@ class VARTrainer(object):
             else:               # not in progressive training
                 Ltail = self.val_loss(logits_BLV.data[:, -self.last_l:].reshape(-1, V), gt_BL[:, -self.last_l:].reshape(-1)).item()
                 acc_tail = (pred_BL[:, -self.last_l:] == gt_BL[:, -self.last_l:]).float().mean().item() * 100
-            grad_norm = grad_norm.item()
+            grad_norm = grad_norm.item() if grad_norm is not None else 0.0
             metric_lg.update(Lm=Lmean, Lt=Ltail, Accm=acc_mean, Acct=acc_tail, tnm=grad_norm)
         
         # log to tensorboard

@@ -344,8 +344,11 @@ class VAR(nn.Module):
             # Store original labels before drop (for aux cls loss masking)
             original_labels = label_B.clone()
 
-            # 随机drop label用于classifier-free guidance训练
-            drop_mask = torch.rand(B, device=label_B.device) < self.cond_drop_rate
+            # 随机drop label用于classifier-free guidance训练（仅训练时）
+            if self.training:
+                drop_mask = torch.rand(B, device=label_B.device) < self.cond_drop_rate
+            else:
+                drop_mask = torch.zeros(B, dtype=torch.bool, device=label_B.device)
             label_B = torch.where(drop_mask, self.num_classes, label_B)
 
             # 修复：同步mask category_ids，确保label drop时category_ids也被drop

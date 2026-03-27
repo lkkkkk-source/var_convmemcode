@@ -43,6 +43,9 @@ def build_everything(args: arg_util.Args):
         num_classes, dataset_train, dataset_val = build_dataset(
             args.data_path, final_reso=args.data_load_reso, hflip=args.hflip, mid_reso=args.mid_reso,
             cyclic_shift=args.cyclic_shift,
+            vflip=args.vflip,
+            rand_rot=args.rand_rot,
+            color_jitter=args.color_jitter,
         )
         types = str((type(dataset_train).__name__, type(dataset_val).__name__))
         
@@ -90,6 +93,7 @@ def build_everything(args: arg_util.Args):
         num_classes=num_classes, depth=args.depth, shared_aln=args.saln, attn_l2_norm=args.anorm,
         flash_if_available=args.fuse, fused_if_available=args.fuse,
         init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, init_std=args.ini,
+        drop_rate=args.drop, attn_drop_rate=args.drop, drop_path_rate=args.drop_path,
         # Axial texture enhancement
         enable_texture=args.tex,
         texture_scales=list(map(int, args.tex_scales.replace('-', '_').split('_'))) if args.tex else [3, 5, 7, 11],
@@ -107,7 +111,7 @@ def build_everything(args: arg_util.Args):
         aux_cls_tap_layer=args.aux_tap_layer,
     )
     
-    vae_ckpt = './model_path/vae_ch160v4096z32.pth'
+    vae_ckpt = '../model_path/vae_ch160v4096z32.pth'
     if dist.is_local_master():
         if not os.path.exists(vae_ckpt):
             try:
@@ -120,82 +124,6 @@ def build_everything(args: arg_util.Args):
     dist.barrier()
     vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
     
-    # ========== Load pretrained VAR weights (e.g., from ImageNet) ==========
-    has_auto_resumed = len(auto_resume_info) > 0 and 'success' in auto_resume_info[-1]
-    if args.pretrained_ckpt and has_auto_resumed:
-        # Skip if auto_resume already loaded a checkpoint (continuing training)
-        print(f'[pretrained] Skipping pretrained loading: auto_resume already loaded a checkpoint')
-    elif args.pretrained_ckpt:
-        print(f'[pretrained] Loading pretrained VAR from {args.pretrained_ckpt} ...')
-        pretrained_state = torch.load(args.pretrained_ckpt, map_location='cpu')
-
-        # Handle checkpoint format: could be raw state_dict or wrapped in 'trainer'/'var_wo_ddp'
-        if 'trainer' in pretrained_state and 'var_wo_ddp' in pretrained_state['trainer']:
-            pt_sd = pretrained_state['trainer']['var_wo_ddp']
-        elif 'var_wo_ddp' in pretrained_state:
-            pt_sd = pretrained_state['var_wo_ddp']
-        elif 'state_dict' in pretrained_state:
-            pt_sd = pretrained_state['state_dict']
-        else:
-            # Assume it's a raw state_dict
-            pt_sd = pretrained_state
-
-        model_sd = var_wo_ddp.state_dict()
-
-        # Filter: skip mismatched shapes (e.g., class_emb, aux_cls_head, new modules)
-        loaded_keys = []
-        skipped_keys = []
-        for k, v in pt_sd.items():
-            if k in model_sd and model_sd[k].shape == v.shape:
-                model_sd[k] = v
-                loaded_keys.append(k)
-            else:
-                skipped_keys.append(k)
-
-        # Find keys in model but not in pretrained (new modules)
-        new_keys = [k for k in model_sd if k not in pt_sd]
-
-        var_wo_ddp.load_state_dict(model_sd, strict=True)
-        print(f'[pretrained] Loaded {len(loaded_keys)}/{len(pt_sd)} keys from pretrained checkpoint')
-        if skipped_keys:
-            print(f'[pretrained] Skipped (shape mismatch): {skipped_keys[:20]}{"..." if len(skipped_keys) > 20 else ""}')
-        if new_keys:
-            print(f'[pretrained] New (randomly init): {new_keys[:20]}{"..." if len(new_keys) > 20 else ""}')
-        del pretrained_state, pt_sd
-
-    # ========== Freeze layers for fine-tuning ==========
-    if args.freeze_layers:
-        parts = list(map(int, args.freeze_layers.replace('-', '_').split('_')))
-        if len(parts) == 2:
-            freeze_start, freeze_end = parts[0], parts[1]
-        elif len(parts) == 1:
-            freeze_start, freeze_end = 0, parts[0]
-        else:
-            raise ValueError(f'--freeze_layers format: start_end (e.g., 0_7) or single number (e.g., 7)')
-
-        frozen_count = 0
-        for i in range(freeze_start, min(freeze_end + 1, len(var_wo_ddp.blocks))):
-            for param in var_wo_ddp.blocks[i].parameters():
-                param.requires_grad = False
-                frozen_count += 1
-
-        # Also freeze shared embeddings if freezing from layer 0
-        if freeze_start == 0:
-            for param in var_wo_ddp.word_embed.parameters():
-                param.requires_grad = False
-                frozen_count += 1
-            for param in [var_wo_ddp.pos_1LC, var_wo_ddp.pos_start]:
-                param.requires_grad = False
-                frozen_count += 1
-            for param in var_wo_ddp.lvl_embed.parameters():
-                param.requires_grad = False
-                frozen_count += 1
-
-        trainable = sum(p.numel() for p in var_wo_ddp.parameters() if p.requires_grad)
-        total = sum(p.numel() for p in var_wo_ddp.parameters())
-        print(f'[freeze] Froze layers {freeze_start}-{freeze_end} ({frozen_count} params)')
-        print(f'[freeze] Trainable: {trainable/1e6:.2f}M / {total/1e6:.2f}M ({100*trainable/total:.1f}%)')
-
     vae_local: VQVAE = args.compile_model(vae_local, args.vfast)
     var_wo_ddp: VAR = args.compile_model(var_wo_ddp, args.tfast)
     # Note: find_unused_parameters=True is needed because:
@@ -232,9 +160,9 @@ def build_everything(args: arg_util.Args):
         residual_scale_names = set()
 
         for name in name_to_param.keys():
-            if 'memory_per_scale' in name or 'shared_memory' in name or 'category_memories' in name or 'category_embedding' in name or 'cat_A' in name or 'cat_B' in name:
+            if 'memory_per_scale' in name or 'shared_memory' in name or 'category_memories' in name or 'category_embedding' in name:
                 memory_slot_names.add(name)
-            elif 'knitting_memory' in name and ('proj' in name or 'out_proj' in name):
+            elif 'knitting_memory' in name and ('proj' in name or 'out_proj' in name or 'Wk_mem' in name or 'Wv_mem' in name):
                 memory_proj_names.add(name)
             elif 'residual_scale' in name:
                 residual_scale_names.add(name)
@@ -313,39 +241,6 @@ def build_everything(args: arg_util.Args):
     else:
         # Normal parameter grouping (no memory)
         final_para_groups = para_groups
-
-    # Apply fine-tuning lr scale to backbone parameters
-    if args.pretrained_ckpt and args.finetune_lr_scale != 1.0:
-        # Identify new module parameters (texture, memory, class_emb, aux_cls)
-        new_param_ids = set()
-        for name, param in var_wo_ddp.named_parameters():
-            if any(kw in name for kw in ('knitting_memory', 'gabor_texture', 'texture_conv',
-                                          'class_emb', 'aux_cls_head', 'Wk_tex', 'Wv_tex', 'Wq_tex',
-                                          'Wk_mem', 'Wv_mem', 'alpha_mlp', 'gate_logit')):
-                new_param_ids.add(id(param))
-
-        for group in final_para_groups:
-            backbone_params = []
-            new_params = []
-            for p in group['params']:
-                if id(p) in new_param_ids:
-                    new_params.append(p)
-                else:
-                    backbone_params.append(p)
-
-            if backbone_params and new_params:
-                # Split group: backbone gets scaled lr, new modules get full lr
-                group['params'] = new_params  # keep original lr for new modules
-                final_para_groups.append({
-                    'params': backbone_params,
-                    'lr_sc': group.get('lr_sc', 1.0) * args.finetune_lr_scale,
-                    'wd_sc': group.get('wd_sc', 1.0),
-                })
-            elif backbone_params:
-                # All backbone params
-                group['lr_sc'] = group.get('lr_sc', 1.0) * args.finetune_lr_scale
-
-        print(f'[finetune] Backbone lr scale: {args.finetune_lr_scale}x')
 
     # Build optimizer
     opt_clz = {
@@ -437,12 +332,12 @@ def main_training():
             total_epochs=args.ep,
             warmup_epochs=args.mem_temp_warmup,
             temp_init=0.5,
-            temp_final=0.35,  # 小数据先用较高终温，避免 slot 塌缩
+            temp_final=0.20,  # 避免过早硬化，保持注意力分布
             div_weight_init=0.0,
             div_weight_final=args.mem_div_weight,
         )
         print(f"\n[Memory Scheduler] Warmup epochs: {args.mem_temp_warmup}")
-        print(f"  Temperature: 0.5 -> 0.35")
+        print(f"  Temperature: 0.5 -> 0.20")
         print(f"  Diversity weight: 0.0 -> {args.mem_div_weight}\n")
 
     L_mean, L_tail = -1, -1
@@ -507,7 +402,7 @@ def main_training():
         args.remain_time, args.finish_time = remain_time, finish_time
         
         AR_ep_loss = dict(L_mean=L_mean, L_tail=L_tail, acc_mean=acc_mean, acc_tail=acc_tail)
-        is_val_and_also_saving = (ep + 1) % 2 == 0 or (ep + 1) == args.ep
+        is_val_and_also_saving = (ep + 1) % 10 == 0 or (ep + 1) == args.ep
         if is_val_and_also_saving:
             val_loss_mean, val_loss_tail, val_acc_mean, val_acc_tail, tot, cost = trainer.eval_ep(ld_val)
             best_updated = best_val_loss_tail > val_loss_tail
@@ -515,7 +410,7 @@ def main_training():
             best_val_acc_mean, best_val_acc_tail = max(best_val_acc_mean, val_acc_mean), max(best_val_acc_tail, val_acc_tail)
             AR_ep_loss.update(vL_mean=val_loss_mean, vL_tail=val_loss_tail, vacc_mean=val_acc_mean, vacc_tail=val_acc_tail)
             args.vL_mean, args.vL_tail, args.vacc_mean, args.vacc_tail = val_loss_mean, val_loss_tail, val_acc_mean, val_acc_tail
-            print(f' [*] [ep{ep}]  (val {tot})  Lm: {L_mean:.4f}, Lt: {L_tail:.4f}, Acc m&t: {acc_mean:.2f} {acc_tail:.2f},  Val cost: {cost:.2f}s')
+            print(f' [*] [ep{ep}]  (val {tot})  Lm: {val_loss_mean:.4f}, Lt: {val_loss_tail:.4f}, Acc m&t: {val_acc_mean:.2f} {val_acc_tail:.2f},  Val cost: {cost:.2f}s')
             
             if dist.is_local_master():
                 local_out_ckpt = os.path.join(args.local_out_dir_path, 'ar-ckpt-last.pth')
