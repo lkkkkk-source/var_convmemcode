@@ -124,6 +124,9 @@ class Args(Tap):
     data_load_reso: int = None  # [automatically set; don't specify this] would be max(patch_nums) * patch_size
     mid_reso: float = 1.125     # aug: first resize to mid_reso = 1.125 * data_load_reso, then crop to data_load_reso
     hflip: bool = False         # augmentation: horizontal flip
+    vflip: bool = False         # augmentation: vertical flip
+    rand_rot: bool = False      # augmentation: random rotation
+    color_jitter: float = 0.0   # augmentation: color jitter strength (0=disabled)
     workers: int = 0        # num workers; 0: auto, -1: don't use multiprocessing in DataLoader
     
     # progressive training

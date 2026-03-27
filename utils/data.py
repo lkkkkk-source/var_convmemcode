@@ -33,6 +33,9 @@ def build_dataset(
     data_path: str, final_reso: int,
     hflip=False, mid_reso=1.125,
     cyclic_shift=False,
+    vflip=False,
+    rand_rot=False,
+    color_jitter=0.0,
 ):
     # build augmentations
     mid_reso = round(mid_reso * final_reso)  # first resize to mid_reso, then crop to final_reso
@@ -50,6 +53,9 @@ def build_dataset(
         train_aug.append(CyclicShiftTransform(p=0.5))
     train_aug.append(normalize_01_into_pm1)
     if hflip: train_aug.insert(0, transforms.RandomHorizontalFlip())
+    if vflip: train_aug.insert(0, transforms.RandomVerticalFlip())
+    if rand_rot: train_aug.insert(0, transforms.RandomRotation(degrees=90))
+    if color_jitter > 0: train_aug.insert(0, transforms.ColorJitter(brightness=color_jitter, contrast=color_jitter, saturation=color_jitter))
     train_aug, val_aug = transforms.Compose(train_aug), transforms.Compose(val_aug)
     
     # build dataset
