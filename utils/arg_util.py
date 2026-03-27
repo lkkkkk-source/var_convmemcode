@@ -127,6 +127,8 @@ class Args(Tap):
     vflip: bool = False         # augmentation: vertical flip
     rand_rot: bool = False      # augmentation: random rotation
     color_jitter: float = 0.0   # augmentation: color jitter strength (0=disabled)
+    drop: float = 0.0           # dropout rate
+    drop_path: float = 0.0      # drop path rate (stochastic depth)
     workers: int = 0        # num workers; 0: auto, -1: don't use multiprocessing in DataLoader
     
     # progressive training
