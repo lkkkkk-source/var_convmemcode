@@ -14,8 +14,11 @@ img*/
 local_output*
 model_path/
 dataset_v3_patches/
+evaluation_results/
 smoke_data/
 *.pth
 *.pth.tar
 *.ckpt
 *.log
+*.png
+*.jpg

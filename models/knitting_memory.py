@@ -202,13 +202,29 @@ class KnittingPatternMemory(nn.Module):
 
     def _compute_diversity_loss(self, attn_weights_list: list) -> torch.Tensor:
         total_loss = 0.0
-        K = 15
+        K = 6
+
+        max_collapse_ratio = 0.0
+        avg_num_slots = 0.0
+
         for _scale_idx, attn in attn_weights_list:
             num_slots_eff = attn.shape[-1]
             slot_usage = attn.mean(dim=(0, 1))
             max_usage = slot_usage.max()
+
+            collapse_ratio = max_usage * num_slots_eff
+            max_collapse_ratio = max(
+                max_collapse_ratio,
+                collapse_ratio.item() if isinstance(collapse_ratio, torch.Tensor) else collapse_ratio
+            )
+            avg_num_slots += num_slots_eff
+
             collapse_threshold = K / num_slots_eff
             total_loss = total_loss + F.relu(max_usage - collapse_threshold)
+
+        self._last_collapse_ratio = max_collapse_ratio
+        self._last_avg_num_slots = avg_num_slots / max(len(attn_weights_list), 1)
+
         return total_loss / max(len(attn_weights_list), 1)
 
     def _compute_slot_sep_loss(self) -> torch.Tensor:

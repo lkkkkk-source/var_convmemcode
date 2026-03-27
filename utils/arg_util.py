@@ -87,15 +87,15 @@ class Args(Tap):
     # Axial texture enhancement
     tex: bool = False       # whether to enable axial texture enhancement
     tex_scales: str = '3_5_7_11'  # texture kernel scales, e.g., '3_5_7_11'
-    tex_layers: str = ''    # texture enable layers, empty means second half; e.g., '8_9_10_11_12_13_14_15'
+    tex_layers: str = '9_10_11_12_13_14_15'    # texture enable layers (skip frozen boundary layer 8)
     tex_per_head: bool = False    # whether to use per-head kernels (default: shared across heads)
 
     # Knitting pattern memory
     mem: bool = False       # whether to enable knitting pattern memory
     mem_patterns: int = 16  # number of patterns in memory bank
     mem_size: int = 8       # number of slots per pattern
-    mem_layers: str = '4_8_12'  # memory enable layers
-    mem_div_weight: float = 0.01  # diversity loss weight (10x increase to prevent slot collapse)
+    mem_layers: str = '10_14'  # memory enable layers (away from frozen boundary, well-spaced)
+    mem_div_weight: float = 0.05  # diversity loss weight (prevent slot collapse)
     mem_temp_warmup: int = 50     # temperature warmup epochs (extended for better slot differentiation)
     mem_class_aware: bool = False  # whether to use class-aware memory (ClassAwareKnittingMemory)
     mem_num_categories: int = 22   # number of categories for class-aware memory
@@ -105,7 +105,7 @@ class Args(Tap):
     seam_warmup: int = 10          # seam loss warmup epochs
     aux_cls_weight: float = 0.10   # auxiliary classification loss weight
     slot_sep_weight: float = 0.001 # slot separation loss weight
-    aux_tap_layer: int = 4         # which layer to tap for aux classification
+    aux_tap_layer: int = 9         # which layer to tap for aux classification (must be unfrozen)
 
     # Fine-tuning from pretrained
     pretrained_ckpt: str = './var_d16.pth'      # path to pretrained VAR checkpoint (e.g., ImageNet pretrained)

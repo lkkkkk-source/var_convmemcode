@@ -28,9 +28,9 @@ torchrun --nproc_per_node=4 --master_port=18555 train.py \
 	--hflip=True \
 	--workers=5 \
 	--tex=True \
-	--tex_layers=8_9_10_11_12_13_14_15 \
+	--tex_layers=9_10_11_12_13_14_15 \
 	--tex_scales=3_5_7_11 \
 	--aux_cls_weight=0.10 \
-	--aux_tap_layer=4 \
+	--aux_tap_layer=9 \
 	--seam_weight=0.02 \
 	--seam_warmup=10

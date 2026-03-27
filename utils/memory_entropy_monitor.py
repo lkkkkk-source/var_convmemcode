@@ -74,12 +74,17 @@ class MemoryEntropyMonitor:
         # 计算query
         query = mem.query_proj(x)
 
-        # 获取指定尺度的shared memory
+        # 获取指定尺度的memory (兼容 class-aware 和非 class-aware)
         scale_key = f'scale_{scale_idx}'
-        if scale_key not in mem.shared_memory:
+        if hasattr(mem, 'shared_memory'):
+            memory_dict = mem.shared_memory
+        else:
+            memory_dict = mem.memory_per_scale
+
+        if scale_key not in memory_dict:
             scale_key = 'scale_0'
 
-        shared_mem = mem.shared_memory[scale_key]
+        shared_mem = memory_dict[scale_key]
         shared_flat = shared_mem.view(-1, C)
         k_shared = mem.key_proj(shared_flat)
         num_slots = k_shared.shape[0]

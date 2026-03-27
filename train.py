@@ -107,7 +107,7 @@ def build_everything(args: arg_util.Args):
         aux_cls_tap_layer=args.aux_tap_layer,
     )
     
-    vae_ckpt = '../model_path/vae_ch160v4096z32.pth'
+    vae_ckpt = './model_path/vae_ch160v4096z32.pth'
     if dist.is_local_master():
         if not os.path.exists(vae_ckpt):
             try:
@@ -232,7 +232,7 @@ def build_everything(args: arg_util.Args):
         residual_scale_names = set()
 
         for name in name_to_param.keys():
-            if 'memory_per_scale' in name or 'shared_memory' in name or 'category_memories' in name or 'category_embedding' in name:
+            if 'memory_per_scale' in name or 'shared_memory' in name or 'category_memories' in name or 'category_embedding' in name or 'cat_A' in name or 'cat_B' in name:
                 memory_slot_names.add(name)
             elif 'knitting_memory' in name and ('proj' in name or 'out_proj' in name):
                 memory_proj_names.add(name)
@@ -437,12 +437,12 @@ def main_training():
             total_epochs=args.ep,
             warmup_epochs=args.mem_temp_warmup,
             temp_init=0.5,
-            temp_final=0.20,  # 避免过早硬化，保持注意力分布
+            temp_final=0.35,  # 小数据先用较高终温，避免 slot 塌缩
             div_weight_init=0.0,
             div_weight_final=args.mem_div_weight,
         )
         print(f"\n[Memory Scheduler] Warmup epochs: {args.mem_temp_warmup}")
-        print(f"  Temperature: 0.5 -> 0.20")
+        print(f"  Temperature: 0.5 -> 0.35")
         print(f"  Diversity weight: 0.0 -> {args.mem_div_weight}\n")
 
     L_mean, L_tail = -1, -1
@@ -507,7 +507,7 @@ def main_training():
         args.remain_time, args.finish_time = remain_time, finish_time
         
         AR_ep_loss = dict(L_mean=L_mean, L_tail=L_tail, acc_mean=acc_mean, acc_tail=acc_tail)
-        is_val_and_also_saving = (ep + 1) % 10 == 0 or (ep + 1) == args.ep
+        is_val_and_also_saving = (ep + 1) % 2 == 0 or (ep + 1) == args.ep
         if is_val_and_also_saving:
             val_loss_mean, val_loss_tail, val_acc_mean, val_acc_tail, tot, cost = trainer.eval_ep(ld_val)
             best_updated = best_val_loss_tail > val_loss_tail

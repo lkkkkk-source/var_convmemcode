@@ -431,7 +431,24 @@ except ImportError:
 
 # 准备目录
 generated_dir = os.path.abspath(os.path.join(args.output_dir, "generated_images_for_fid"))
-real_dir = os.path.abspath(os.path.join(args.data_path, "val"))  # 使用验证集进行FID计算
+# 合并 train+val+test 作为真实图像参考集
+import pathlib
+IMAGE_EXTS = {'png', 'jpg', 'jpeg', 'bmp', 'tiff', 'webp'}
+real_dir = os.path.abspath(os.path.join(args.output_dir, "temp_all_real_images"))
+if os.path.exists(real_dir):
+    shutil.rmtree(real_dir)
+os.makedirs(real_dir, exist_ok=True)
+_real_count = 0
+for _split in ['train', 'val', 'test']:
+    _split_dir = pathlib.Path(args.data_path) / _split
+    if not _split_dir.exists():
+        continue
+    for _f in _split_dir.rglob('*'):
+        if _f.suffix[1:].lower() in IMAGE_EXTS:
+            _dest = os.path.join(real_dir, f"real_{_real_count:06d}{_f.suffix}")
+            shutil.copy2(str(_f), _dest)
+            _real_count += 1
+print(f"📂 真实图像合并完成: {_real_count} 张 (train+val+test)")
 print(f"📂 生成图像目录（绝对路径）: {generated_dir}")
 print(f"📂 真实图像目录（绝对路径）: {real_dir}")
 

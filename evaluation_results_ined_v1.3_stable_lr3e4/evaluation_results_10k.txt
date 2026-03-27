@@ -1,0 +1,4 @@
+FID (10k generated vs 8700 real): 80.3186
+KID (10k generated vs 8700 real): 0.032788
+Total generated: 10000
+Total real used: 8700

@@ -204,9 +204,9 @@ class SelfAttention(nn.Module):
                     embed_dim=embed_dim,
                     num_categories=num_categories,
                     num_scales=memory_num_scales,
-                    shared_patterns=8,
-                    shared_memory_size=4,
-                    cat_rank=8,
+                    shared_patterns=memory_num_patterns,
+                    shared_memory_size=memory_size,
+                    cat_rank=4,
                     block_idx=block_idx,
                     depth=depth,
                 )
