@@ -6,6 +6,7 @@ import sys
 import time
 import warnings
 from functools import partial
+from typing import Dict, List, Set, Tuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -15,6 +16,142 @@ from utils import arg_util, misc
 from utils.data import build_dataset
 from utils.data_sampler import DistInfiniteBatchSampler, EvalDistributedSampler
 from utils.misc import auto_resume
+
+
+def _looks_like_state_dict(candidate) -> bool:
+    if not isinstance(candidate, dict) or len(candidate) == 0:
+        return False
+    return all(isinstance(k, str) for k in candidate.keys()) and any(torch.is_tensor(v) for v in candidate.values())
+
+
+def _extract_var_state_dict(ckpt_obj) -> Dict[str, torch.Tensor]:
+    if _looks_like_state_dict(ckpt_obj):
+        return ckpt_obj
+
+    if isinstance(ckpt_obj, dict):
+        for key in ('var_wo_ddp', 'state_dict', 'model', 'module', 'var'):
+            value = ckpt_obj.get(key, None)
+            if _looks_like_state_dict(value):
+                assert isinstance(value, dict)
+                return value
+
+        trainer_state = ckpt_obj.get('trainer', None)
+        if isinstance(trainer_state, dict):
+            value = trainer_state.get('var_wo_ddp', None)
+            if _looks_like_state_dict(value):
+                assert isinstance(value, dict)
+                return value
+
+    raise RuntimeError('Cannot extract VAR state_dict from checkpoint payload.')
+
+
+def _normalize_state_dict_keys(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    prefixes = ('module.', '_orig_mod.', 'var.', 'var_wo_ddp.', 'trainer.var_wo_ddp.')
+    normalized = {}
+    for key, value in state_dict.items():
+        if not torch.is_tensor(value):
+            continue
+        new_key = key
+        changed = True
+        while changed:
+            changed = False
+            for prefix in prefixes:
+                if new_key.startswith(prefix):
+                    new_key = new_key[len(prefix):]
+                    changed = True
+        normalized[new_key] = value
+    return normalized
+
+
+def _parse_freeze_layers_spec(spec: str, depth: int) -> List[int]:
+    if not spec:
+        return []
+    items = [s.strip() for s in spec.replace('-', '_').split('_') if s.strip()]
+    if len(items) == 0:
+        return []
+    try:
+        idxs = [int(x) for x in items]
+    except ValueError:
+        print(f'[INIT][WARN] Invalid --freeze_layers={spec}, skip freezing.')
+        return []
+
+    if len(idxs) == 2 and idxs[0] <= idxs[1]:
+        idxs = list(range(idxs[0], idxs[1] + 1))
+
+    valid = sorted({i for i in idxs if 0 <= i < depth})
+    return valid
+
+
+def _freeze_backbone_layers(var_model, freeze_layers: List[int]) -> int:
+    if not freeze_layers:
+        return 0
+
+    keep_trainable_keywords = (
+        'knitting_memory',
+        'texture_',
+        'row_',
+        'col_',
+        'diag_',
+        'tex_',
+        'memory_per_scale',
+        'shared_memory',
+        'category_memories',
+        'category_embedding',
+    )
+
+    frozen_count = 0
+    freeze_layer_set = set(freeze_layers)
+    for name, para in var_model.named_parameters():
+        if not name.startswith('blocks.'):
+            continue
+        parts = name.split('.')
+        if len(parts) < 2:
+            continue
+        try:
+            layer_idx = int(parts[1])
+        except ValueError:
+            continue
+        if layer_idx not in freeze_layer_set:
+            continue
+        if any(k in name for k in keep_trainable_keywords):
+            continue
+        if para.requires_grad:
+            para.requires_grad = False
+            frozen_count += 1
+    return frozen_count
+
+
+def _apply_finetune_lr_scale(
+    para_groups: List[dict],
+    pretrained_param_ids: Set[int],
+    finetune_lr_scale: float,
+) -> Tuple[List[dict], int]:
+    if finetune_lr_scale == 1.0 or len(pretrained_param_ids) == 0:
+        return para_groups, 0
+
+    scaled_groups = []
+    scaled_param_count = 0
+    for group in para_groups:
+        pre_params, new_params = [], []
+        for para in group['params']:
+            if id(para) in pretrained_param_ids:
+                pre_params.append(para)
+            else:
+                new_params.append(para)
+
+        if pre_params:
+            g_pre = dict(group)
+            g_pre['params'] = pre_params
+            g_pre['lr_sc'] = g_pre.get('lr_sc', 1.0) * finetune_lr_scale
+            scaled_groups.append(g_pre)
+            scaled_param_count += len(pre_params)
+
+        if new_params:
+            g_new = dict(group)
+            g_new['params'] = new_params
+            scaled_groups.append(g_new)
+
+    return scaled_groups, scaled_param_count
 
 
 def build_everything(args: arg_util.Args):
@@ -134,6 +271,59 @@ def build_everything(args: arg_util.Args):
     
     vae_local: VQVAE = args.compile_model(vae_local, args.vfast)
     var_wo_ddp: VAR = args.compile_model(var_wo_ddp, args.tfast)
+
+    # Load pretrained VAR checkpoint for finetuning (only when not auto-resuming training state)
+    pretrained_loaded_param_ids: Set[int] = set()
+    did_load_pretrained = False
+    if args.pretrained_ckpt and not (trainer_state is not None and len(trainer_state)):
+        if not os.path.exists(args.pretrained_ckpt):
+            print(f'[INIT][Finetune][WARN] --pretrained_ckpt not found: {args.pretrained_ckpt}; skip pretrained loading.')
+        else:
+            raw_ckpt = torch.load(args.pretrained_ckpt, map_location='cpu')
+            raw_var_sd = _extract_var_state_dict(raw_ckpt)
+            pretrained_sd = _normalize_state_dict_keys(raw_var_sd)
+
+            model_sd = var_wo_ddp.state_dict()
+            loadable_sd = {}
+            mismatch = []
+            for k, v in pretrained_sd.items():
+                if k in model_sd:
+                    if model_sd[k].shape == v.shape:
+                        loadable_sd[k] = v
+                    else:
+                        mismatch.append((k, tuple(v.shape), tuple(model_sd[k].shape)))
+
+            missing = [k for k in model_sd.keys() if k not in loadable_sd]
+            unexpected = [k for k in pretrained_sd.keys() if k not in model_sd]
+            var_wo_ddp.load_state_dict(loadable_sd, strict=False)
+
+            param_names = {name for name, _ in var_wo_ddp.named_parameters()}
+            pretrained_loaded_param_ids = {
+                id(param)
+                for name, param in var_wo_ddp.named_parameters()
+                if name in loadable_sd
+            }
+            loaded_param_names = {name for name in loadable_sd.keys() if name in param_names}
+            did_load_pretrained = len(loaded_param_names) > 0
+
+            print(
+                f'[INIT][Finetune] Loaded pretrained VAR from {args.pretrained_ckpt}\n'
+                f'  loaded_keys={len(loadable_sd)}, missing_keys={len(missing)}, '
+                f'unexpected_keys={len(unexpected)}, shape_mismatch={len(mismatch)}\n'
+                f'  loaded_parameters={len(loaded_param_names)}'
+            )
+    elif args.pretrained_ckpt:
+        print('[INIT][Finetune] Auto-resume detected: skip loading --pretrained_ckpt (resume state has priority).')
+
+    # Freeze selected backbone blocks while keeping newly-added modules trainable
+    freeze_layers = _parse_freeze_layers_spec(args.freeze_layers, args.depth)
+    should_apply_freeze = bool(freeze_layers) and (did_load_pretrained or (trainer_state is not None and len(trainer_state)))
+    if should_apply_freeze:
+        frozen_count = _freeze_backbone_layers(var_wo_ddp, freeze_layers)
+        print(f'[INIT][Finetune] Frozen backbone params in blocks {freeze_layers}: {frozen_count} parameters.')
+    elif freeze_layers:
+        print('[INIT][Finetune][WARN] freeze_layers is set but pretrained weights are not loaded; skip freezing.')
+
     # Note: find_unused_parameters=True is needed because:
     # 1. Texture enhancement is only enabled in some layers (second half by default)
     # 2. Memory bank is only enabled in specific layers [0, depth//4, depth//2, 3*depth//4]
@@ -249,6 +439,18 @@ def build_everything(args: arg_util.Args):
     else:
         # Normal parameter grouping (no memory)
         final_para_groups = para_groups
+
+    # Fine-tuning LR scaling for pretrained/backbone parameters
+    final_para_groups, scaled_param_count = _apply_finetune_lr_scale(
+        para_groups=final_para_groups,
+        pretrained_param_ids=pretrained_loaded_param_ids,
+        finetune_lr_scale=args.finetune_lr_scale,
+    )
+    if scaled_param_count > 0:
+        print(
+            f'[INIT][Finetune] Applied finetune_lr_scale={args.finetune_lr_scale:g} '
+            f'to {scaled_param_count} pretrained parameters.'
+        )
 
     # Build optimizer
     opt_clz = {
