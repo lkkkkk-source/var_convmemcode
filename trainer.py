@@ -85,6 +85,13 @@ class VARTrainer(object):
                         )
                         self._hooks.append(hook)
 
+        self.monitor_every = 500
+        self._texture_dead_gate_thresh = 0.02
+        self._texture_flatline_head_ratio_thresh = 0.95
+        self._memory_dead_gate_thresh = 0.02
+        self._memory_flatline_loss_eps = 1e-8
+        self._memory_dead_slot_ratio_thresh = 0.95
+
     def _make_capture_hook(self, layer_idx):
         """Create a forward hook that captures the input to a SelfAttention layer."""
         def hook_fn(module, input, output):
@@ -94,6 +101,171 @@ class VARTrainer(object):
             if isinstance(input, tuple) and len(input) > 0:
                 self._captured_hidden_states[layer_idx] = input[0].detach()
         return hook_fn
+
+    @staticmethod
+    def _to_float(v) -> float:
+        if isinstance(v, torch.Tensor):
+            return float(v.detach().item())
+        return float(v)
+
+    def _log_texture_and_memory_monitoring(self, tb_lg: TensorboardLogger, var_model, g_it: int):
+        texture_gate_means = []
+        texture_dead_layers = 0
+        texture_layers = 0
+
+        memory_temps = []
+        memory_div_vals = []
+        memory_sep_vals = []
+        memory_usage_concentration = []
+        memory_dead_slot_ratios = []
+        memory_flatline_layers = 0
+        memory_dead_gate_layers = 0
+        memory_layers = 0
+
+        warnings = []
+
+        for block_idx, block in enumerate(var_model.blocks):
+            attn = block.attn
+
+            if getattr(attn, 'enable_texture', False) and hasattr(attn, 'get_texture_gate_stats'):
+                texture_layers += 1
+                tex_stats = attn.get_texture_gate_stats()
+                gate_mean = self._to_float(tex_stats.get('gate_mean', 0.0))
+                gate_std = self._to_float(tex_stats.get('gate_std', 0.0))
+                gate_min = self._to_float(tex_stats.get('gate_min', 0.0))
+                gate_max = self._to_float(tex_stats.get('gate_max', 0.0))
+                head_flatline_ratio = self._to_float(tex_stats.get('head_flatline_ratio', 0.0))
+                texture_gate_means.append(gate_mean)
+
+                tb_lg.update(
+                    head='Monitoring/texture',
+                    **{
+                        f'layer{block_idx}_gate_mean': gate_mean,
+                        f'layer{block_idx}_gate_std': gate_std,
+                        f'layer{block_idx}_gate_min': gate_min,
+                        f'layer{block_idx}_gate_max': gate_max,
+                        f'layer{block_idx}_head_flatline_ratio': head_flatline_ratio,
+                    },
+                    step=g_it,
+                )
+
+                if gate_mean < self._texture_dead_gate_thresh or head_flatline_ratio >= self._texture_flatline_head_ratio_thresh:
+                    texture_dead_layers += 1
+                    warnings.append(
+                        f'texture layer {block_idx} appears flatline: gate_mean={gate_mean:.5f}, '
+                        f'head_flatline_ratio={head_flatline_ratio:.3f}'
+                    )
+
+            if hasattr(attn, 'knitting_memory'):
+                memory_layers += 1
+                mem = attn.knitting_memory
+                diag = mem.get_diagnostics() if hasattr(mem, 'get_diagnostics') else {}
+
+                temp_val = self._to_float(diag.get('temperature', mem.get_current_temperature()))
+                div_val = self._to_float(getattr(mem, 'last_diversity_loss', 0.0))
+                sep_val = self._to_float(getattr(mem, 'last_slot_sep_loss', 0.0))
+                usage_conc = self._to_float(diag.get('usage_concentration', getattr(mem, '_last_collapse_ratio', 0.0)))
+                dead_slot_ratio = self._to_float(diag.get('dead_slot_ratio', 0.0))
+                gk = self._to_float(diag.get('gk_weight', torch.sigmoid(mem.gk_logit)))
+                gv = self._to_float(diag.get('gv_weight', torch.sigmoid(mem.gv_logit)))
+                flatline_flag = bool(diag.get('flatline', False))
+
+                memory_temps.append(temp_val)
+                memory_div_vals.append(div_val)
+                memory_sep_vals.append(sep_val)
+                memory_usage_concentration.append(usage_conc)
+                memory_dead_slot_ratios.append(dead_slot_ratio)
+
+                tb_lg.update(
+                    head='Monitoring/memory',
+                    **{
+                        f'layer{block_idx}_temperature': temp_val,
+                        f'layer{block_idx}_diversity_loss': div_val,
+                        f'layer{block_idx}_slot_separation_loss': sep_val,
+                        f'layer{block_idx}_usage_concentration': usage_conc,
+                        f'layer{block_idx}_dead_slot_ratio': dead_slot_ratio,
+                        f'layer{block_idx}_gk_weight': gk,
+                        f'layer{block_idx}_gv_weight': gv,
+                    },
+                    step=g_it,
+                )
+
+                if flatline_flag or (abs(div_val) <= self._memory_flatline_loss_eps and abs(sep_val) <= self._memory_flatline_loss_eps):
+                    memory_flatline_layers += 1
+                    warnings.append(
+                        f'memory layer {block_idx} appears flatline: div={div_val:.6e}, sep={sep_val:.6e}'
+                    )
+
+                if max(gk, gv) < self._memory_dead_gate_thresh:
+                    memory_dead_gate_layers += 1
+                    warnings.append(
+                        f'memory layer {block_idx} gate too small: gk={gk:.5f}, gv={gv:.5f}'
+                    )
+
+                if dead_slot_ratio >= self._memory_dead_slot_ratio_thresh:
+                    warnings.append(
+                        f'memory layer {block_idx} dead slots high: dead_slot_ratio={dead_slot_ratio:.3f}'
+                    )
+
+        if texture_layers == 0:
+            warnings.append('texture branch inactive: no texture-enabled layers found')
+        if memory_layers == 0:
+            warnings.append('memory branch inactive: no memory-enabled layers found')
+
+        def _mean(vals):
+            return sum(vals) / max(len(vals), 1)
+
+        tb_lg.update(
+            head='Monitoring/summary',
+            texture_layers=texture_layers,
+            texture_gate_mean_avg=_mean(texture_gate_means),
+            texture_dead_layer_ratio=(texture_dead_layers / max(texture_layers, 1)),
+            memory_layers=memory_layers,
+            memory_temperature_avg=_mean(memory_temps),
+            memory_diversity_avg=_mean(memory_div_vals),
+            memory_slot_separation_avg=_mean(memory_sep_vals),
+            memory_usage_concentration_avg=_mean(memory_usage_concentration),
+            memory_dead_slot_ratio_avg=_mean(memory_dead_slot_ratios),
+            memory_flatline_layer_ratio=(memory_flatline_layers / max(memory_layers, 1)),
+            memory_dead_gate_layer_ratio=(memory_dead_gate_layers / max(memory_layers, 1)),
+            warning_count=len(warnings),
+            step=g_it,
+        )
+
+        if warnings:
+            for msg in warnings:
+                print(f'[Monitoring Warning][it={g_it}] {msg}')
+
+    @staticmethod
+    def debug_collect_branch_warnings_for_test(texture_stats: List[dict], memory_stats: List[dict]) -> List[str]:
+        """Utility for controlled flatline-warning evidence generation."""
+        warnings = []
+        for idx, tex in enumerate(texture_stats):
+            gate_mean = float(tex.get('gate_mean', 0.0))
+            head_flatline_ratio = float(tex.get('head_flatline_ratio', 0.0))
+            if gate_mean < 0.02 or head_flatline_ratio >= 0.95:
+                warnings.append(
+                    f'texture layer {idx} appears flatline: gate_mean={gate_mean:.5f}, '
+                    f'head_flatline_ratio={head_flatline_ratio:.3f}'
+                )
+        for idx, mem in enumerate(memory_stats):
+            div_val = float(mem.get('diversity_loss', 0.0))
+            sep_val = float(mem.get('slot_separation_loss', 0.0))
+            gk = float(mem.get('gk_weight', 0.0))
+            gv = float(mem.get('gv_weight', 0.0))
+            if abs(div_val) <= 1e-8 and abs(sep_val) <= 1e-8:
+                warnings.append(
+                    f'memory layer {idx} appears flatline: div={div_val:.6e}, sep={sep_val:.6e}'
+                )
+            if max(gk, gv) < 0.02:
+                warnings.append(
+                    f'memory layer {idx} gate too small: gk={gk:.5f}, gv={gv:.5f}'
+                )
+        if len(texture_stats) == 0:
+            warnings.append('texture branch inactive: no texture-enabled layers found')
+        if len(memory_stats) == 0:
+            warnings.append('memory branch inactive: no memory-enabled layers found')
+        return warnings
     
     @torch.no_grad()
     def eval_ep(self, ld_val: DataLoader):
@@ -154,7 +326,7 @@ class VARTrainer(object):
         with self.var_opt.amp_ctx:
             # Enable entropy capture only near tensorboard logging steps (every 500)
             self._capture_enabled = (self.entropy_monitor is not None and
-                                     (g_it == 0 or (g_it + 1) % 500 == 0))
+                                     (g_it == 0 or (g_it + 1) % self.monitor_every == 0))
             # NOTE: category_ids=label_B assumes num_classes == num_categories.
             # If your dataset has different class/category counts, add a mapping here.
             logits_BLV, aux_cls_loss = self.var(label_B, x_BLCv_wo_first_l, category_ids=label_B)
@@ -217,11 +389,11 @@ class VARTrainer(object):
             else:               # not in progressive training
                 Ltail = self.val_loss(logits_BLV.data[:, -self.last_l:].reshape(-1, V), gt_BL[:, -self.last_l:].reshape(-1)).item()
                 acc_tail = (pred_BL[:, -self.last_l:] == gt_BL[:, -self.last_l:]).float().mean().item() * 100
-            grad_norm = grad_norm.item() if grad_norm is not None else 0.0
+            grad_norm = self._to_float(grad_norm) if grad_norm is not None else 0.0
             metric_lg.update(Lm=Lmean, Lt=Ltail, Accm=acc_mean, Acct=acc_tail, tnm=grad_norm)
         
         # log to tensorboard
-        if g_it == 0 or (g_it + 1) % 500 == 0:
+        if g_it == 0 or (g_it + 1) % self.monitor_every == 0:
             prob_per_class_is_chosen = pred_BL.view(-1).bincount(minlength=V).float()
             dist.allreduce(prob_per_class_is_chosen)
             prob_per_class_is_chosen /= prob_per_class_is_chosen.sum()
@@ -243,8 +415,8 @@ class VARTrainer(object):
 
                 # Log memory diversity loss if enabled
                 if num_memory_layers > 0:
-                    div_val = diversity_loss.item() if isinstance(diversity_loss, torch.Tensor) else diversity_loss
-                    sep_val = slot_sep_loss.item() if isinstance(slot_sep_loss, torch.Tensor) else slot_sep_loss
+                    div_val = self._to_float(diversity_loss)
+                    sep_val = self._to_float(slot_sep_loss)
                     tb_lg.update(head='Memory/diversity_loss', div_loss=div_val, step=g_it)
                     tb_lg.update(head='Memory/slot_sep_loss', sep_loss=sep_val, step=g_it)
                     tb_lg.update(head='Memory/div_weight', div_weight=self.current_diversity_weight, step=g_it)
@@ -254,13 +426,11 @@ class VARTrainer(object):
                     for block_idx, block in enumerate(var_model.blocks):
                         if hasattr(block.attn, 'knitting_memory'):
                             mem = block.attn.knitting_memory
-                            temp_val = mem.get_current_temperature()
-                            if isinstance(temp_val, torch.Tensor):
-                                temp_val = temp_val.item()
+                            temp_val = self._to_float(mem.get_current_temperature())
                             tb_lg.update(head=f'Memory/gk_weight_layer{block_idx}',
-                                        value=torch.sigmoid(mem.gk_logit).item(), step=g_it)
+                                        value=float(torch.sigmoid(mem.gk_logit)), step=g_it)
                             tb_lg.update(head=f'Memory/gv_weight_layer{block_idx}',
-                                        value=torch.sigmoid(mem.gv_logit).item(), step=g_it)
+                                        value=float(torch.sigmoid(mem.gv_logit)), step=g_it)
                             tb_lg.update(head=f'Memory/temperature_layer{block_idx}',
                                         value=temp_val, step=g_it)
                             if hasattr(mem, '_last_collapse_ratio'):
@@ -282,6 +452,8 @@ class VARTrainer(object):
                                         tb_lg.update(head=f'Memory/max_attn_layer{layer_idx}',
                                                     value=metrics['max_attn'], step=g_it)
                             self._captured_hidden_states.clear()
+
+                self._log_texture_and_memory_monitoring(tb_lg=tb_lg, var_model=var_model, g_it=g_it)
 
                 # Log seam loss
                 if seam_loss is not None:

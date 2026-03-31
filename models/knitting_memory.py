@@ -77,6 +77,13 @@ class KnittingPatternMemory(nn.Module):
         self.ema_momentum = 0.99
         self.last_diversity_loss = torch.tensor(0.0)
         self.last_slot_sep_loss = torch.tensor(0.0)
+        self._last_usage_concentration = 0.0
+        self._last_dead_slot_ratio = 0.0
+        self._last_dead_slot_count = 0
+        self._last_total_visible_slots = 0
+        self._last_flatline_flag = False
+        self._dead_slot_eps = 1e-4
+        self._flatline_loss_eps = 1e-8
 
         # Slot sep loss cache
         self._slot_sep_cache = None
@@ -195,6 +202,15 @@ class KnittingPatternMemory(nn.Module):
         if self.training:
             self._update_slot_usage_ema(all_attn_weights)
 
+        usage_concentration, dead_slot_ratio, dead_slot_count, total_visible_slots = self._compute_usage_health(all_attn_weights)
+        self._last_usage_concentration = usage_concentration
+        self._last_dead_slot_ratio = dead_slot_ratio
+        self._last_dead_slot_count = dead_slot_count
+        self._last_total_visible_slots = total_visible_slots
+        div_val = diversity_loss.item() if isinstance(diversity_loss, torch.Tensor) else float(diversity_loss)
+        sep_val = slot_sep_loss.item() if isinstance(slot_sep_loss, torch.Tensor) else float(slot_sep_loss)
+        self._last_flatline_flag = (div_val <= self._flatline_loss_eps and sep_val <= self._flatline_loss_eps)
+
         self.last_diversity_loss = diversity_loss
         self.last_slot_sep_loss = slot_sep_loss
 
@@ -255,6 +271,31 @@ class KnittingPatternMemory(nn.Module):
                     usage_by_scale, alpha=1 - self.ema_momentum
                 )
 
+    def _compute_usage_health(self, attn_weights_list: list) -> Tuple[float, float, int, int]:
+        """Compute compact liveness diagnostics for trainer summary logging."""
+        if len(attn_weights_list) == 0:
+            return 0.0, 0.0, 0, 0
+
+        concentration_vals = []
+        dead_slots = 0
+        total_slots = 0
+
+        for _scale_idx, attn in attn_weights_list:
+            slot_usage = attn.mean(dim=(0, 1))
+            num_slots = slot_usage.numel()
+            if num_slots == 0:
+                continue
+            concentration_vals.append(float(slot_usage.max().detach().cpu()) * float(num_slots))
+            dead_slots += (slot_usage < self._dead_slot_eps).sum().item()
+            total_slots += num_slots
+
+        if total_slots == 0:
+            return 0.0, 0.0, 0, 0
+
+        usage_concentration = sum(concentration_vals) / max(len(concentration_vals), 1)
+        dead_slot_ratio = dead_slots / total_slots
+        return usage_concentration, dead_slot_ratio, dead_slots, total_slots
+
     def get_diagnostics(self) -> dict:
         with torch.no_grad():
             all_slots = []
@@ -269,10 +310,10 @@ class KnittingPatternMemory(nn.Module):
             off_diag_sim = similarity[mask]
             usage = self.slot_usage_ema.flatten().cpu().numpy()
             current_temp = self.get_current_temperature()
-            if isinstance(current_temp, torch.Tensor):
-                current_temp = current_temp.item()
-            gk = torch.sigmoid(self.gk_logit).item()
-            gv = torch.sigmoid(self.gv_logit).item()
+            current_temp = float(current_temp)
+            gk = float(torch.sigmoid(self.gk_logit))
+            gv = float(torch.sigmoid(self.gv_logit))
+            flatline = bool(self._last_flatline_flag)
 
             return {
                 'layer': self.block_idx,
@@ -285,7 +326,12 @@ class KnittingPatternMemory(nn.Module):
                 'temperature': current_temp,
                 'gk_weight': gk,
                 'gv_weight': gv,
-            }
+                'usage_concentration': self._last_usage_concentration,
+                'dead_slot_ratio': self._last_dead_slot_ratio,
+                'dead_slot_count': self._last_dead_slot_count,
+                'total_visible_slots': self._last_total_visible_slots,
+                'flatline': flatline,
+                }
 
     def extra_repr(self) -> str:
         gk = torch.sigmoid(self.gk_logit).item()

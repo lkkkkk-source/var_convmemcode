@@ -223,6 +223,7 @@ class SelfAttention(nn.Module):
 
         # Pre-computed texture execution plan (lazily built on first forward)
         self._texture_plan = None if enable_texture else []
+        self._last_texture_gate_stats = {}
 
     def kv_caching(self, enable: bool):
         self.caching, self.cached_k, self.cached_v = enable, None, None
@@ -466,6 +467,36 @@ class SelfAttention(nn.Module):
             oup = slow_attn(query=q, key=k, value=v, scale=self.scale, attn_mask=attn_bias, dropout_p=dropout_p).transpose(1, 2).reshape(B, L, C)
 
         return self.proj_drop(self.proj(oup))
+
+    def get_texture_gate_stats(self) -> dict:
+        """Return compact per-layer texture gate summaries for trainer logging."""
+        if not self.enable_texture:
+            return {
+                'enabled': False,
+                'gate_mean': 0.0,
+                'gate_std': 0.0,
+                'gate_min': 0.0,
+                'gate_max': 0.0,
+                'head_flatline_ratio': 1.0,
+            }
+
+        with torch.no_grad():
+            gate_vals = torch.sigmoid(self.texture_gate_logit.detach()).view(-1)
+            gate_mean = gate_vals.mean().item()
+            gate_std = gate_vals.std(unbiased=False).item()
+            gate_min = gate_vals.min().item()
+            gate_max = gate_vals.max().item()
+            head_flatline_ratio = (gate_vals < 0.02).float().mean().item()
+
+        self._last_texture_gate_stats = {
+            'enabled': True,
+            'gate_mean': gate_mean,
+            'gate_std': gate_std,
+            'gate_min': gate_min,
+            'gate_max': gate_max,
+            'head_flatline_ratio': head_flatline_ratio,
+        }
+        return self._last_texture_gate_stats
 
     def extra_repr(self) -> str:
         gate_val = torch.sigmoid(self.texture_gate_logit).mean().item() if self.enable_texture else 0.0

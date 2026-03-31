@@ -22,3 +22,5 @@ smoke_data/
 *.log
 *.png
 *.jpg
+.sisyphus/
+nul
