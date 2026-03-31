@@ -11,7 +11,6 @@ import dist
 from models import VAR, VQVAE, VectorQuantizer2
 from utils.amp_sc import AmpOptimizer
 from utils.misc import MetricLogger, TensorboardLogger
-from utils.memory_entropy_monitor import MemoryEntropyMonitor
 
 Ten = torch.Tensor
 FTen = torch.Tensor
@@ -68,39 +67,12 @@ class VARTrainer(object):
         self.current_seam_weight = 0.0  # warmed up externally
         self.current_aux_cls_weight = 0.10
 
-        # Memory entropy monitor (for tracking attention distribution)
-        self.entropy_monitor = None
-        self._captured_hidden_states = {}  # layer_idx -> tensor, captured via hooks
-        self._hooks = []
-        self._capture_enabled = False  # Only enable near logging steps to avoid per-step detach overhead
-        if hasattr(var_wo_ddp, 'blocks'):
-            has_memory = any(hasattr(b.attn, 'knitting_memory') for b in var_wo_ddp.blocks)
-            if has_memory:
-                self.entropy_monitor = MemoryEntropyMonitor(var_wo_ddp, patch_nums)
-                # Register forward hooks to capture hidden states entering memory layers
-                for idx, block in enumerate(var_wo_ddp.blocks):
-                    if hasattr(block.attn, 'knitting_memory'):
-                        hook = block.attn.register_forward_hook(
-                            self._make_capture_hook(idx)
-                        )
-                        self._hooks.append(hook)
-
         self.monitor_every = 500
         self._texture_dead_gate_thresh = 0.02
         self._texture_flatline_head_ratio_thresh = 0.95
         self._memory_dead_gate_thresh = 0.02
         self._memory_flatline_loss_eps = 1e-8
         self._memory_dead_slot_ratio_thresh = 0.95
-
-    def _make_capture_hook(self, layer_idx):
-        """Create a forward hook that captures the input to a SelfAttention layer."""
-        def hook_fn(module, input, output):
-            if not self._capture_enabled:
-                return
-            # input[0] is x (the normalized hidden state passed to SelfAttention.forward)
-            if isinstance(input, tuple) and len(input) > 0:
-                self._captured_hidden_states[layer_idx] = input[0].detach()
-        return hook_fn
 
     @staticmethod
     def _to_float(v) -> float:
@@ -324,9 +296,6 @@ class VARTrainer(object):
         x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
         
         with self.var_opt.amp_ctx:
-            # Enable entropy capture only near tensorboard logging steps (every 500)
-            self._capture_enabled = (self.entropy_monitor is not None and
-                                     (g_it == 0 or (g_it + 1) % self.monitor_every == 0))
             # NOTE: category_ids=label_B assumes num_classes == num_categories.
             # If your dataset has different class/category counts, add a mapping here.
             logits_BLV, aux_cls_loss = self.var(label_B, x_BLCv_wo_first_l, category_ids=label_B)
@@ -437,21 +406,40 @@ class VARTrainer(object):
                                 tb_lg.update(head=f'Memory/collapse_ratio_layer{block_idx}',
                                             value=mem._last_collapse_ratio, step=g_it)
 
-                    # Log entropy ratio (attention distribution quality)
-                    if self.entropy_monitor is not None and self._captured_hidden_states:
-                        with torch.no_grad():
-                            for layer_idx in self.entropy_monitor.memory_layers:
-                                if layer_idx in self._captured_hidden_states:
-                                    x_real = self._captured_hidden_states[layer_idx]
-                                    metrics = self.entropy_monitor.compute_entropy_ratio(
-                                        x_real, layer_idx
-                                    )
-                                    if metrics:
-                                        tb_lg.update(head=f'Memory/entropy_ratio_layer{layer_idx}',
-                                                    value=metrics['entropy_ratio'], step=g_it)
-                                        tb_lg.update(head=f'Memory/max_attn_layer{layer_idx}',
-                                                    value=metrics['max_attn'], step=g_it)
-                            self._captured_hidden_states.clear()
+                            diag = mem.get_diagnostics() if hasattr(mem, 'get_diagnostics') else {}
+                            entropy_weighted = self._to_float(diag.get('entropy_ratio_weighted', 0.0))
+                            entropy_dispersion = self._to_float(diag.get('entropy_dispersion', 0.0))
+                            effective_slot_usage = self._to_float(diag.get('effective_slot_usage_weighted', 0.0))
+                            max_attn_weighted = self._to_float(diag.get('max_attn_weighted', 0.0))
+
+                            # New all-scale entropy metrics
+                            tb_lg.update(head=f'Memory/entropy_ratio_layer{block_idx}_weighted',
+                                        value=entropy_weighted, step=g_it)
+                            tb_lg.update(head=f'Memory/entropy_dispersion_layer{block_idx}',
+                                        value=entropy_dispersion, step=g_it)
+                            tb_lg.update(head=f'Memory/effective_slot_usage_layer{block_idx}_weighted',
+                                        value=effective_slot_usage, step=g_it)
+
+                            entropy_per_scale = diag.get('entropy_ratio_per_scale', {})
+                            if isinstance(entropy_per_scale, dict):
+                                for scale_key, scale_stats in entropy_per_scale.items():
+                                    if not isinstance(scale_stats, dict):
+                                        continue
+                                    entropy_scale = scale_stats.get('entropy_ratio', None)
+                                    if entropy_scale is None:
+                                        continue
+                                    if isinstance(scale_key, str) and scale_key.startswith('scale_'):
+                                        scale_suffix = scale_key.split('_')[-1]
+                                    else:
+                                        scale_suffix = str(scale_key)
+                                    tb_lg.update(head=f'Memory/entropy_ratio_layer{block_idx}_scale{scale_suffix}',
+                                                value=self._to_float(entropy_scale), step=g_it)
+
+                            # Compatibility tags
+                            tb_lg.update(head=f'Memory/entropy_ratio_layer{block_idx}',
+                                        value=entropy_weighted, step=g_it)
+                            tb_lg.update(head=f'Memory/max_attn_layer{block_idx}',
+                                        value=max_attn_weighted, step=g_it)
 
                 self._log_texture_and_memory_monitoring(tb_lg=tb_lg, var_model=var_model, g_it=g_it)
 

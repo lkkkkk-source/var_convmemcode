@@ -82,6 +82,11 @@ class KnittingPatternMemory(nn.Module):
         self._last_dead_slot_count = 0
         self._last_total_visible_slots = 0
         self._last_flatline_flag = False
+        self._last_entropy_ratio_weighted = 0.0
+        self._last_entropy_dispersion = 0.0
+        self._last_effective_slot_usage_weighted = 0.0
+        self._last_max_attn_weighted = 0.0
+        self._last_entropy_ratio_per_scale = {}
         self._dead_slot_eps = 1e-4
         self._flatline_loss_eps = 1e-8
 
@@ -203,6 +208,7 @@ class KnittingPatternMemory(nn.Module):
             self._update_slot_usage_ema(all_attn_weights)
 
         usage_concentration, dead_slot_ratio, dead_slot_count, total_visible_slots = self._compute_usage_health(all_attn_weights)
+        self._compute_entropy_health(all_attn_weights, begin_ends)
         self._last_usage_concentration = usage_concentration
         self._last_dead_slot_ratio = dead_slot_ratio
         self._last_dead_slot_count = dead_slot_count
@@ -296,6 +302,73 @@ class KnittingPatternMemory(nn.Module):
         dead_slot_ratio = dead_slots / total_slots
         return usage_concentration, dead_slot_ratio, dead_slots, total_slots
 
+    def _compute_entropy_health(self, attn_weights_list: list, begin_ends: List[Tuple[int, int]]) -> None:
+        """Compute entropy metrics from real forward attention weights."""
+        if len(attn_weights_list) == 0:
+            self._last_entropy_ratio_weighted = 0.0
+            self._last_entropy_dispersion = 0.0
+            self._last_effective_slot_usage_weighted = 0.0
+            self._last_max_attn_weighted = 0.0
+            self._last_entropy_ratio_per_scale = {}
+            return
+
+        with torch.no_grad():
+            entropy_ratios = []
+            effective_slots = []
+            max_attn_vals = []
+            token_weights = []
+            per_scale = {}
+
+            for scale_idx, attn in attn_weights_list:
+                if scale_idx >= len(begin_ends):
+                    continue
+                start, end = begin_ends[scale_idx]
+                token_count = max(end - start, 0)
+                if token_count <= 0:
+                    continue
+
+                num_slots = attn.shape[-1]
+                entropy = -(attn * torch.log(attn.clamp_min(1e-8))).sum(dim=-1).mean()
+                if num_slots > 1:
+                    entropy_ratio = (entropy / math.log(num_slots)).item()
+                else:
+                    entropy_ratio = 0.0
+
+                effective_slot_usage = math.exp(entropy.item())
+                max_attn = attn.max(dim=-1).values.mean().item()
+
+                entropy_ratios.append(entropy_ratio)
+                effective_slots.append(effective_slot_usage)
+                max_attn_vals.append(max_attn)
+                token_weights.append(float(token_count))
+
+                per_scale[f'scale_{scale_idx}'] = {
+                    'entropy_ratio': entropy_ratio,
+                    'effective_slot_usage': effective_slot_usage,
+                    'num_slots': int(num_slots),
+                    'token_count': int(token_count),
+                }
+
+            if not token_weights:
+                self._last_entropy_ratio_weighted = 0.0
+                self._last_entropy_dispersion = 0.0
+                self._last_effective_slot_usage_weighted = 0.0
+                self._last_max_attn_weighted = 0.0
+                self._last_entropy_ratio_per_scale = {}
+                return
+
+            weight_sum = sum(token_weights)
+            weighted_ratio = sum(r * w for r, w in zip(entropy_ratios, token_weights)) / weight_sum
+            weighted_eff_slots = sum(u * w for u, w in zip(effective_slots, token_weights)) / weight_sum
+            weighted_max_attn = sum(m * w for m, w in zip(max_attn_vals, token_weights)) / weight_sum
+            weighted_var = sum(((r - weighted_ratio) ** 2) * w for r, w in zip(entropy_ratios, token_weights)) / weight_sum
+
+            self._last_entropy_ratio_weighted = weighted_ratio
+            self._last_entropy_dispersion = math.sqrt(max(weighted_var, 0.0))
+            self._last_effective_slot_usage_weighted = weighted_eff_slots
+            self._last_max_attn_weighted = weighted_max_attn
+            self._last_entropy_ratio_per_scale = per_scale
+
     def get_diagnostics(self) -> dict:
         with torch.no_grad():
             all_slots = []
@@ -331,6 +404,11 @@ class KnittingPatternMemory(nn.Module):
                 'dead_slot_count': self._last_dead_slot_count,
                 'total_visible_slots': self._last_total_visible_slots,
                 'flatline': flatline,
+                'entropy_ratio_weighted': self._last_entropy_ratio_weighted,
+                'entropy_dispersion': self._last_entropy_dispersion,
+                'effective_slot_usage_weighted': self._last_effective_slot_usage_weighted,
+                'max_attn_weighted': self._last_max_attn_weighted,
+                'entropy_ratio_per_scale': self._last_entropy_ratio_per_scale,
                 }
 
     def extra_repr(self) -> str:

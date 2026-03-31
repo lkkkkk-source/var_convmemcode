@@ -13,6 +13,10 @@ import PIL.Image as PImage, PIL.ImageDraw as PImageDraw
 import shutil
 import glob
 import argparse
+import json
+from collections import defaultdict
+
+from torchvision.datasets.folder import DatasetFolder, IMG_EXTENSIONS
 
 # 禁用默认参数初始化以提高加载速度
 setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)
@@ -74,6 +78,8 @@ parser.add_argument('--memory_enable_layers', type=str, default=None,
                     help='Layers to enable memory (underscore-separated, e.g., 0_1_2)')
 parser.add_argument('--mem_class_aware', action='store_true',
                     help='Use class-aware memory (ClassAwareKnittingMemory) instead of basic memory')
+parser.add_argument('--memory_num_categories', type=int, default=None,
+                    help='Number of categories for class-aware memory (default: use --num_classes)')
 
 args = parser.parse_args()
 
@@ -106,6 +112,7 @@ if args.enable_memory:
     print(f"    --memory_size: {args.memory_size}")
     print(f"    --memory_enable_layers: {args.memory_enable_layers}")
     print(f"    --mem_class_aware: {args.mem_class_aware}")
+    print(f"    --memory_num_categories: {args.memory_num_categories}")
 
 # 评估参数
 print("\n⚙️ 生成参数:")
@@ -238,6 +245,142 @@ def calculate_ssim(generated_images, real_images, sample_size=500):
         return None, None
 
 
+def pil_loader_rgb(path):
+    with open(path, 'rb') as f:
+        img = PImage.open(f).convert('RGB')
+    return img
+
+
+def collect_real_images_by_class(data_path):
+    split_datasets = {}
+    class_name_to_label = {}
+    split_roots = {
+        'train': os.path.join(data_path, 'train'),
+        'val': os.path.join(data_path, 'val'),
+        'test': os.path.join(data_path, 'test'),
+    }
+
+    for split_name in ['train', 'val', 'test']:
+        split_root = split_roots[split_name]
+        if not os.path.isdir(split_root):
+            continue
+        split_datasets[split_name] = DatasetFolder(
+            root=split_root,
+            loader=pil_loader_rgb,
+            extensions=IMG_EXTENSIONS,
+        )
+
+    if 'train' in split_datasets:
+        class_name_to_label.update(split_datasets['train'].class_to_idx)
+    else:
+        class_names = set()
+        for dataset in split_datasets.values():
+            class_names.update(dataset.classes)
+        for idx, class_name in enumerate(sorted(class_names)):
+            class_name_to_label[class_name] = idx
+
+    real_images_by_class = defaultdict(list)
+    skipped_unknown = 0
+
+    for split_name in ['train', 'val', 'test']:
+        dataset = split_datasets.get(split_name)
+        if dataset is None:
+            continue
+        for sample_path, class_idx in dataset.samples:
+            class_name = dataset.classes[class_idx]
+            mapped_label = class_name_to_label.get(class_name)
+            if mapped_label is None:
+                skipped_unknown += 1
+                continue
+            real_images_by_class[mapped_label].append(sample_path)
+
+    if skipped_unknown > 0:
+        print(f"⚠️ 跳过 {skipped_unknown} 个无法映射类别的真实样本")
+
+    return real_images_by_class
+
+
+def compute_per_class_fid(args, generated_images_by_class, real_images_by_class, output_dir, image_size=256):
+    try:
+        from cleanfid import fid
+    except ImportError:
+        print("⚠️ clean-fid 未安装，跳过 per-class FID")
+        return None
+
+    per_class_results = {}
+    temp_root = os.path.join(output_dir, "temp_per_class_fid")
+    if os.path.exists(temp_root):
+        shutil.rmtree(temp_root)
+    os.makedirs(temp_root, exist_ok=True)
+
+    rng = random.Random(args.seed)
+
+    for class_id in range(args.num_classes):
+        class_key = str(class_id)
+        gen_paths = generated_images_by_class.get(class_id, [])
+        real_paths = real_images_by_class.get(class_id, [])
+
+        if len(gen_paths) < 2 or len(real_paths) < 2:
+            per_class_results[class_key] = {
+                'fid': None,
+                'reason': f'insufficient samples: generated={len(gen_paths)}, real={len(real_paths)}, requires >=2 for each',
+                'num_generated': len(gen_paths),
+                'num_real': len(real_paths),
+            }
+            continue
+
+        if len(real_paths) > len(gen_paths):
+            selected_real_paths = rng.sample(real_paths, len(gen_paths))
+        else:
+            selected_real_paths = real_paths
+
+        class_temp_dir = os.path.join(temp_root, f'class_{class_id:03d}')
+        class_gen_dir = os.path.join(class_temp_dir, 'generated')
+        class_real_dir = os.path.join(class_temp_dir, 'real')
+        os.makedirs(class_gen_dir, exist_ok=True)
+        os.makedirs(class_real_dir, exist_ok=True)
+
+        try:
+            for idx, src_path in enumerate(gen_paths):
+                with PImage.open(src_path) as img:
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    img = img.resize((image_size, image_size), PImage.Resampling.LANCZOS)
+                    img.save(os.path.join(class_gen_dir, f'gen_{idx:05d}.png'), 'PNG')
+
+            for idx, src_path in enumerate(selected_real_paths):
+                with PImage.open(src_path) as img:
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    img = img.resize((image_size, image_size), PImage.Resampling.LANCZOS)
+                    img.save(os.path.join(class_real_dir, f'real_{idx:05d}.png'), 'PNG')
+
+            class_fid = fid.compute_fid(class_gen_dir, class_real_dir, mode='clean', num_workers=0)
+            per_class_results[class_key] = {
+                'fid': float(class_fid),
+                'reason': None,
+                'num_generated': len(gen_paths),
+                'num_real': len(selected_real_paths),
+            }
+        except Exception as e:
+            per_class_results[class_key] = {
+                'fid': None,
+                'reason': f'per-class FID failed: {e}',
+                'num_generated': len(gen_paths),
+                'num_real': len(selected_real_paths),
+            }
+
+    if os.path.exists(temp_root):
+        shutil.rmtree(temp_root)
+
+    per_class_fid_path = os.path.join(output_dir, 'per_class_fid.json')
+    with open(per_class_fid_path, 'w', encoding='utf-8') as f:
+        json.dump(per_class_results, f, ensure_ascii=False, indent=2)
+
+    print(f"💾 每类别FID结果已保存到: {per_class_fid_path}")
+    return per_class_results
+
+
 MODEL_DEPTH = args.depth
 assert MODEL_DEPTH in {16, 20, 24, 30, 36}
 
@@ -273,6 +416,7 @@ print("🔧 构建VAR_convMem模型...")
 texture_scales = list(map(int, args.texture_scales.replace('-', '_').split('_'))) if args.enable_texture else [3, 5, 7, 11]
 texture_enable_layers = list(map(int, args.texture_enable_layers.replace('-', '_').split('_'))) if args.texture_enable_layers else None
 memory_enable_layers = list(map(int, args.memory_enable_layers.replace('-', '_').split('_'))) if args.memory_enable_layers else None
+memory_num_categories = args.memory_num_categories if args.memory_num_categories is not None else args.num_classes
 
 vae, var = build_vae_var(
     V=4096, Cvae=32, ch=160, share_quant_resi=4,
@@ -290,6 +434,7 @@ vae, var = build_vae_var(
     memory_size=args.memory_size,
     memory_enable_layers=memory_enable_layers,
     use_class_aware_memory=args.mem_class_aware,
+    num_categories=memory_num_categories,
 )
 print("✅ 模型构建完成")
 import sys; sys.stdout.flush()
@@ -473,6 +618,7 @@ generation_labels = generation_labels[:num_samples_for_fid]
 
 # 打乱顺序以避免批次偏差
 random.shuffle(generation_labels)
+generated_images_by_class = defaultdict(list)
 
 num_batches = (num_samples_for_fid + batch_size - 1) // batch_size
 sample_count = 0
@@ -507,6 +653,7 @@ for batch_idx in range(num_batches):
             # 保存图像
             img_path = os.path.join(generated_dir, f"generated_{sample_count:05d}.png")
             img_pil.save(img_path)
+            generated_images_by_class[batch_labels[i]].append(img_path)
             sample_count += 1
 
         if (batch_idx + 1) % 10 == 0:
@@ -587,6 +734,8 @@ else:
 
             print(f"   已复制 {copied_count} 张真实图像到临时目录")
 
+            real_images_by_class = collect_real_images_by_class(args.data_path)
+
             # 使用 clean-fid 计算 FID
             print(f"\n🧮 使用 clean-fid 计算 FID...")
             fid_value = fid.compute_fid(generated_dir, temp_real_dir, mode="clean", num_workers=0)
@@ -600,15 +749,24 @@ else:
             # 清理临时目录
             shutil.rmtree(temp_real_dir)
 
+            # 计算每类别FID
+            print(f"\n🧮 计算每类别 FID...")
+            compute_per_class_fid(
+                args=args,
+                generated_images_by_class=generated_images_by_class,
+                real_images_by_class=real_images_by_class,
+                output_dir=args.output_dir,
+            )
+
             # 计算额外的评估指标
             print(f"\n📊 计算额外评估指标...")
             evaluation_results = {'FID': fid_value, 'KID': kid_value}
+            gen_img_list = sorted(glob.glob(os.path.join(generated_dir, "*.png")))
+            real_img_list = []
 
             # 1. 计算LPIPS
             try:
                 # 获取生成图像和真实图像的路径列表
-                gen_img_list = sorted(glob.glob(os.path.join(generated_dir, "*.png")))
-
                 # 重新收集真实图像（用于LPIPS计算）
                 import pathlib
                 IMAGE_EXTENSIONS = {'bmp', 'jpg', 'jpeg', 'pgm', 'png', 'ppm', 'tif', 'tiff', 'webp'}
