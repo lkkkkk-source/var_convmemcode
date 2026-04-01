@@ -84,6 +84,7 @@ class SelfAttention(nn.Module):
         # Class-aware memory parameters
         use_class_aware_memory=False,
         num_categories=22,
+        cat_rank=4,
     ):
         super().__init__()
         assert embed_dim % num_heads == 0
@@ -206,7 +207,7 @@ class SelfAttention(nn.Module):
                     num_scales=memory_num_scales,
                     shared_patterns=memory_num_patterns,
                     shared_memory_size=memory_size,
-                    cat_rank=4,
+                    cat_rank=cat_rank,
                     block_idx=block_idx,
                     depth=depth,
                 )
@@ -525,6 +526,7 @@ class AdaLNSelfAttn(nn.Module):
         # Class-aware memory parameters
         use_class_aware_memory: bool = False,
         num_categories: int = 22,
+        cat_rank: int = 4,
     ):
         super(AdaLNSelfAttn, self).__init__()
         self.block_idx, self.last_drop_p, self.C = block_idx, last_drop_p, embed_dim
@@ -546,6 +548,7 @@ class AdaLNSelfAttn(nn.Module):
             memory_num_scales=memory_num_scales,
             use_class_aware_memory=use_class_aware_memory,
             num_categories=num_categories,
+            cat_rank=cat_rank,
         )
 
         self.ffn = FFN(in_features=embed_dim, hidden_features=round(embed_dim * mlp_ratio),

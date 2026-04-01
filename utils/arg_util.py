@@ -99,6 +99,7 @@ class Args(Tap):
     mem_temp_warmup: int = 50     # temperature warmup epochs (extended for better slot differentiation)
     mem_class_aware: bool = False  # whether to use class-aware memory (ClassAwareKnittingMemory)
     mem_num_categories: int = 22   # number of categories for class-aware memory
+    mem_cat_rank: int = 4          # low-rank residual rank for class-aware memory
 
     # Structural losses
     seam_weight: float = 0.02      # seam loss weight

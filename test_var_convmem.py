@@ -80,6 +80,8 @@ parser.add_argument('--mem_class_aware', action='store_true',
                     help='Use class-aware memory (ClassAwareKnittingMemory) instead of basic memory')
 parser.add_argument('--memory_num_categories', type=int, default=None,
                     help='Number of categories for class-aware memory (default: use --num_classes)')
+parser.add_argument('--memory_cat_rank', type=int, default=4,
+                    help='Low-rank residual rank for class-aware memory')
 
 args = parser.parse_args()
 
@@ -113,6 +115,7 @@ if args.enable_memory:
     print(f"    --memory_enable_layers: {args.memory_enable_layers}")
     print(f"    --mem_class_aware: {args.mem_class_aware}")
     print(f"    --memory_num_categories: {args.memory_num_categories}")
+    print(f"    --memory_cat_rank: {args.memory_cat_rank}")
 
 # 评估参数
 print("\n⚙️ 生成参数:")
@@ -435,6 +438,7 @@ vae, var = build_vae_var(
     memory_enable_layers=memory_enable_layers,
     use_class_aware_memory=args.mem_class_aware,
     num_categories=memory_num_categories,
+    cat_rank=args.memory_cat_rank,
 )
 print("✅ 模型构建完成")
 import sys; sys.stdout.flush()

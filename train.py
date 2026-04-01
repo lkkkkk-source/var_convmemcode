@@ -244,6 +244,7 @@ def build_everything(args: arg_util.Args):
         # Class-aware memory
         use_class_aware_memory=args.mem_class_aware,
         num_categories=args.mem_num_categories,
+        cat_rank=args.mem_cat_rank,
         # Auxiliary classification head
         aux_cls_tap_layer=args.aux_tap_layer,
     )

@@ -29,6 +29,7 @@ def build_vae_var(
     # Class-aware memory args
     use_class_aware_memory: bool = False,
     num_categories: int = 22,
+    cat_rank: int = 4,
     # Auxiliary classification head
     aux_cls_tap_layer: int = 4,
 ) -> Tuple[VQVAE, VAR]:
@@ -62,6 +63,7 @@ def build_vae_var(
         # Class-aware memory
         use_class_aware_memory=use_class_aware_memory,
         num_categories=num_categories,
+        cat_rank=cat_rank,
         # Auxiliary classification head
         aux_cls_tap_layer=aux_cls_tap_layer,
     ).to(device)

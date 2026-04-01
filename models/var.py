@@ -40,6 +40,7 @@ class VAR(nn.Module):
         # Class-aware memory parameters
         use_class_aware_memory: bool = False,
         num_categories: int = 22,
+        cat_rank: int = 4,
         # Auxiliary classification head
         aux_cls_tap_layer: int = 4,
     ):
@@ -135,6 +136,7 @@ class VAR(nn.Module):
                 memory_num_scales=len(patch_nums),
                 use_class_aware_memory=use_class_aware_memory,
                 num_categories=num_categories,
+                cat_rank=cat_rank,
             )
             for block_idx in range(depth)
         ])
