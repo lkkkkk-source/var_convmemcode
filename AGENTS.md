@@ -1,169 +1,96 @@
-# AGENTS.md
+# PROJECT KNOWLEDGE BASE
 
-Operational guide for coding agents working in this repository.
-This project is a research-oriented PyTorch codebase for VAR-based knitting image generation.
+**Generated:** 2026-04-01  
+**Commit:** `43c3b33`  
+**Branch:** `finetune`
 
-## 1) Repository Facts
+## OVERVIEW
+Research PyTorch codebase for VAR-based knitting image generation. Main extensions over base VAR: axial texture enhancement and knitting pattern memory (basic + class-aware / low-rank variants).
 
-- Language: Python.
-- ML stack: PyTorch 2.1.x.
-- Package manager: pip inside conda environment.
-- Main entrypoints: `train.py`, `test_var_convmem.py`, `test_optimizations.py`, `test_diversity_loss.py`.
-- Distributed helper: `dist.py`.
-- Core model code: `models/`.
-- Training orchestration: `trainer.py`.
-- Argument definitions: `utils/arg_util.py`.
+## STRUCTURE
+```text
+var_convmemcode/
+├── train.py                 # main training entry
+├── trainer.py               # training loop + monitoring
+├── test_var_convmem.py      # eval / generation / FID-KID script
+├── test_optimizations.py    # script-style correctness checks
+├── test_diversity_loss.py   # standalone loss validation
+├── models/                  # model architecture details → see models/AGENTS.md
+├── utils/                   # arg parsing, data, schedulers, misc → see utils/AGENTS.md
+├── scripts/                 # SLURM/HPC launch helpers → see scripts/AGENTS.md
+└── CLAUDE.md                # extra architecture/context notes
+```
 
-## 2) Rules Files Status
+## WHERE TO LOOK
+| Task | Location | Notes |
+|------|----------|-------|
+| Add/change training flags | `utils/arg_util.py` | canonical training CLI source |
+| Change eval flags / outputs | `test_var_convmem.py` | eval names differ from train names |
+| Modify training behavior | `trainer.py`, `train.py` | trainer owns losses, logging, monitoring |
+| Change model wiring | `models/__init__.py`, `models/var.py`, `models/basic_var.py` | build path + transformer blocks |
+| Memory module work | `models/knitting_memory.py`, `models/class_aware_memory.py` | sparse layer injection; class-aware variant separate |
+| Texture module work | `models/basic_var.py` + `models/gabor_texture*` if present | injected into attention path |
+| Data loading / augmentation | `utils/data.py`, `utils/data_sampler.py` | ImageFolder-style dataset |
+| Runtime diagnostics | `trainer.py`, `utils/memory_entropy_monitor.py` | monitoring may be logging-only |
+| Cluster job changes | `scripts/*.sh`, `submit_knit.sh` | environment-specific SLURM |
 
-- No `.cursorrules` file found.
-- No `.cursor/rules/` directory found.
-- No `.github/copilot-instructions.md` file found.
-- Existing repository-specific guidance is in `CLAUDE.md`; treat it as a useful conventions source.
+## CODE MAP
+| Symbol / Unit | Type | Location | Role |
+|---------------|------|----------|------|
+| `Args` | class | `utils/arg_util.py` | centralized training hyperparameters |
+| `build_vae_var` | function | `models/__init__.py` | constructs VQVAE + VAR and optional modules |
+| `VARTrainer` | class | `trainer.py` | training loop, losses, monitoring, checkpoint-side behavior |
+| `SelfAttention` / `AdaLNSelfAttn` | classes | `models/basic_var.py` | main transformer attention blocks |
+| `KnittingPatternMemory` | class | `models/knitting_memory.py` | base memory bank with causal slot visibility |
+| `ClassAwareKnittingMemoryV2` | class | `models/class_aware_memory.py` | shared memory + category low-rank residuals |
 
-## 3) Environment Setup
+## CONVENTIONS
+- Python only; no formal package/build system.
+- Script-centric workflow: run files directly, not `python -m package`.
+- Tests are also scripts, not a `tests/` package.
+- Train/eval flags intentionally differ:
+  - train: `--tex`, `--mem`, `--mem_layers`, `--mem_patterns`, `--mem_size`, `--mem_class_aware`
+  - eval: `--enable_texture`, `--enable_memory`, `--memory_enable_layers`, `--memory_num_patterns`, `--memory_size`, `--mem_class_aware`
+- Layer lists use underscore-separated strings: `8_12`, not JSON/YAML arrays.
+- Keep changes local; repo style tolerates long arg-heavy lines.
 
-- Recommended conda env name in this workspace: `var`.
-- Activate env:
-  - `conda activate var`
-- Install dependencies:
-  - `python -m pip install -r requirements.txt`
-- Current pinned core dependency:
-  - `torch~=2.1.0`
+## ANTI-PATTERNS (THIS PROJECT)
+- Do **not** change train/eval flag names casually; checkpoint/eval compatibility depends on them.
+- Do **not** mismatch memory-related params between train and eval.
+- Do **not** remove `find_unused_parameters=True` / DDP quirks without tracing sparse texture+memory branches.
+- Do **not** apply `freeze_layers` logic unless pretrained weights are actually loaded.
+- Do **not** treat `test_var_convmem.py` as a unit test; it is an expensive eval script.
+- Do **not** introduce new mandatory tooling configs unless explicitly requested.
+- Do **not** use experimental code paths in `models/quant.py` for normal training without validating numerical behavior.
 
-## 4) Build / Run / Test Commands
+## UNIQUE STYLES
+- Mixed English + Chinese comments/prints are normal; preserve local language context when editing nearby code.
+- Research artifact directories (`logs/`, `local_output/`, `evaluation_results/`) are normal runtime outputs.
+- HPC / SLURM scripts are first-class workflow docs, not incidental utilities.
+- Validation often means `python -m compileall .` plus targeted script runs.
 
-This repo does not define a formal build system (no `pyproject.toml`, `setup.cfg`, `Makefile`, or `tox.ini`).
-Use script-based commands below.
+## COMMANDS
+```bash
+conda activate var
+python -m pip install -r requirements.txt
 
-### 4.1 Training
+# train
+python train.py --data_path <DATASET_ROOT> --exp_name debug_run --bs 4 --depth 16 --ep 10 --fp16 1 --tex True --mem 1 --mem_layers 8_12 --mem_class_aware 1 --mem_num_categories 22 --mem_patterns 4 --mem_size 4
 
-- Single-GPU debug-style run:
-  - `python train.py --data_path <DATASET_ROOT> --exp_name debug_run --bs 4 --depth 16 --ep 10 --fp16 1 --tex True --mem 1 --mem_layers 8_12 --mem_class_aware 1 --mem_num_categories 22 --mem_patterns 4 --mem_size 4`
-- Multi-GPU distributed run (example):
-  - `torchrun --nproc_per_node=2 train.py --data_path <DATASET_ROOT> --exp_name class_aware_fixed_v3 --bs 16 --depth 16 --ep 1000 --fp16 1 --alng 1e-3 --wpe 0.1 --twde 0.05 --tex True --hflip True --workers 5 --mem 1 --mem_layers 8_12 --mem_class_aware 1 --mem_num_categories 22 --mem_patterns 4 --mem_size 4`
+# distributed train
+torchrun --nproc_per_node=2 train.py --data_path <DATASET_ROOT> --exp_name run_name --bs 16 --depth 16 --ep 1000 --fp16 1 --alng 1e-3 --wpe 0.1 --twde 0.05 --tex True --hflip True --workers 5 --mem 1 --mem_layers 8_12 --mem_class_aware 1 --mem_num_categories 22 --mem_patterns 4 --mem_size 4
 
-### 4.2 Evaluation / Inference
+# eval
+python test_var_convmem.py --model_path <CKPT> --vae_path ./model_path/vae_ch160v4096z32.pth --data_path <DATASET_ROOT> --depth 16 --num_samples 4400 --batch_size 32 --num_classes 22 --enable_texture --enable_memory --memory_enable_layers 8_12 --memory_num_patterns 4 --memory_size 4 --mem_class_aware --cfg 1.5 --top_k 900 --top_p 0.96 --seed 0
 
-- Full evaluation script:
-  - `python test_var_convmem.py --model_path ./local_output/ar-ckpt-best.pth --vae_path ../model_path/vae_ch160v4096z32.pth --data_path <DATASET_ROOT> --depth 16 --num_samples 4400 --batch_size 32 --num_classes 22 --enable_texture --enable_memory --memory_enable_layers 8_12 --memory_num_patterns 4 --memory_size 4 --mem_class_aware --cfg 1.5 --top_k 900 --top_p 0.96 --seed 0`
-- Demo-only generation (skip FID/KID):
-  - `python test_var_convmem.py --model_path <CKPT> --vae_path <VAE_CKPT> --data_path <DATASET_ROOT> --demo_only`
+# lightweight validation
+python test_optimizations.py
+python -c "import test_optimizations as t; t.test_texture_plan(); print('done')"
+python test_diversity_loss.py
+python -m compileall .
+```
 
-### 4.3 Tests
-
-- Optimization equivalence tests:
-  - `python test_optimizations.py`
-- Diversity-loss script test:
-  - `python test_diversity_loss.py`
-
-### 4.4 Running a Single Test (Important)
-
-There is no pytest config in-repo, and tests are script-centric.
-Prefer one of these patterns:
-
-- Run one function from `test_optimizations.py` directly:
-  - `python -c "import test_optimizations as t; t.test_texture_plan(); print('done')"`
-- Another single function example:
-  - `python -c "import test_optimizations as t; t.test_class_aware_memory(); print('done')"`
-- If pytest is available in your env, this may also work:
-  - `pytest test_optimizations.py -k texture_plan -q`
-
-### 4.5 Lint / Format / Type Check
-
-- No official linter/formatter/type-check command is configured in this repository.
-- If you need a sanity check before commit, use:
-  - `python -m compileall .`
-- Do not introduce new mandatory tooling configs unless explicitly requested.
-
-## 5) Architecture and Critical Runtime Conventions
-
-- Train/eval flags differ and must be matched carefully:
-  - Train uses `--tex`, `--mem`, `--mem_layers`, `--mem_patterns`, `--mem_size`, `--mem_class_aware`.
-  - Eval uses `--enable_texture`, `--enable_memory`, `--memory_enable_layers`, `--memory_num_patterns`, `--memory_size`, `--mem_class_aware`.
-- Memory-related parameters must match between training and evaluation checkpoints.
-- Layer lists are underscore-separated strings (example: `8_12`).
-- Patch progression default is `1_2_3_4_5_6_8_10_13_16`.
-- Model width/head convention: `embed_dim = depth * 64`, `num_heads = depth`.
-- Training auto-resume uses `local_output/.../ar-ckpt-last.pth`.
-
-## 6) Code Style Guidelines
-
-These reflect observed repository style; follow existing patterns in touched files.
-
-### 6.1 Imports
-
-- Group imports in this order:
-  1) Python stdlib
-  2) Third-party libs
-  3) Local project modules
-- Keep one blank line between groups.
-- Prefer explicit module imports over wildcard imports.
-- Typical alias usage already in codebase is acceptable (`torch.nn.functional as F`, `import os.path as osp`).
-
-### 6.2 Formatting and Layout
-
-- Use 4-space indentation.
-- Keep lines reasonably readable; this repo tolerates moderately long lines in argument-heavy code.
-- Prefer trailing commas in multi-line argument lists.
-- Preserve existing inline comment style when editing nearby code.
-- Do not reformat entire files unless requested.
-
-### 6.3 Typing
-
-- Type hints are used partially; add hints for new public/helper functions where natural.
-- Common patterns in repo:
-  - `Optional[...]`, `Tuple[...]`, `List[...]`, `Union[...]`
-  - tensor aliases in `trainer.py` (`Ten`, `ITen`, etc.)
-- Do not over-engineer typing; stay consistent with local file style.
-
-### 6.4 Naming Conventions
-
-- Classes: `PascalCase` (e.g., `VARTrainer`, `KnittingPatternMemory`).
-- Functions/variables: `snake_case`.
-- Constants: `UPPER_CASE` for module-level constants.
-- CLI flags in `arg_util.py` should remain short and stable; avoid breaking existing names.
-
-### 6.5 Error Handling and Logging
-
-- Prefer explicit checks with clear error messages for missing files/invalid config.
-- Use `raise RuntimeError(...) from e` when wrapping subprocess/runtime failures.
-- For optional deps in scripts, pattern is:
-  - `try: import ... except ImportError: print guidance and exit/return`.
-- Keep logging style pragmatic: `print(...)` is common in this research codebase.
-
-### 6.6 PyTorch and Performance Practices
-
-- Respect mixed precision and distributed semantics already implemented.
-- Avoid device mismatch bugs; move tensors to the same device before arithmetic.
-- Keep DDP behavior intact (for example `find_unused_parameters=True` is intentional here).
-- Avoid changing numerical behavior silently in attention/memory paths.
-
-### 6.7 Reproducibility and Determinism
-
-- Preserve seed-handling patterns in `arg_util.py` and evaluation scripts.
-- Do not remove deterministic toggles without reason.
-- Keep checkpoint format compatibility when adding/removing model fields.
-
-### 6.8 File and Script Conventions
-
-- Training logic belongs in `train.py` + `trainer.py`.
-- Model components belong in `models/`.
-- Utility helpers belong in `utils/`.
-- Prefer adding focused test functions to `test_optimizations.py` for new module equivalence checks.
-
-## 7) Agent Execution Checklist
-
-- Confirm environment: `conda activate var`.
-- Install deps if needed: `python -m pip install -r requirements.txt`.
-- For quick validation after edits:
-  - `python test_optimizations.py` (or one targeted test function).
-- If touching eval path, smoke-test with `--demo_only` to avoid expensive FID pipeline.
-- If touching train/eval flags, verify train/eval naming correspondence.
-- Keep changes minimal and local; avoid broad refactors unless requested.
-
-## 8) Known Gaps / Notes
-
-- `CLAUDE.md` mentions `test_fixes.py`, but that file is not present in current tree.
-- Some scripts include Chinese comments/prints; keep existing language context in touched files.
-- SLURM scripts in `scripts/` are environment-specific examples, not universal local commands.
+## NOTES
+- LSP may be unavailable locally; rely on file reads + targeted greps when necessary.
+- Current repo depth is shallow; child AGENTS only exist for `models/`, `utils/`, and `scripts/`.
+- Child files should carry specifics; root file should stay project-wide.

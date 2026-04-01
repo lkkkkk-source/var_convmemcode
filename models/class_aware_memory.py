@@ -123,6 +123,20 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         self.last_slot_sep_loss = torch.tensor(0.0)
         self._last_collapse_ratio = 0.0
         self._last_avg_num_slots = 0.0
+        
+        # Entropy monitoring (matching KnittingPatternMemory)
+        self._last_usage_concentration = 0.0
+        self._last_dead_slot_ratio = 0.0
+        self._last_dead_slot_count = 0
+        self._last_total_visible_slots = 0
+        self._last_flatline_flag = False
+        self._last_entropy_ratio_weighted = 0.0
+        self._last_entropy_dispersion = 0.0
+        self._last_effective_slot_usage_weighted = 0.0
+        self._last_max_attn_weighted = 0.0
+        self._last_entropy_ratio_per_scale = {}
+        self._dead_slot_eps = 1e-4
+        self._flatline_loss_eps = 1e-8
 
         # Pre-computed visible indices per scale (causal: scale i sees [0..i])
         self._visible_indices_list = [list(range(i + 1)) for i in range(num_scales)]
@@ -281,6 +295,10 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         use_category = category_ids is not None
         has_valid_category = use_category and (category_ids >= 0).any()
 
+        # Handle None case by creating a default tensor
+        if category_ids is None:
+            category_ids = torch.full((B,), -1, device=x.device, dtype=torch.long)
+
         # 4. 逐尺度检索
         mem_combined = torch.zeros_like(x)  # [B, L, C]
         all_attn_weights = []
@@ -373,7 +391,129 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         self.last_diversity_loss = diversity_loss
         self.last_slot_sep_loss = slot_sep_loss
 
+        # EMA update
+        if self.training:
+            self._update_slot_usage_ema(all_attn_weights)
+
+        usage_concentration, dead_slot_ratio, dead_slot_count, total_visible_slots = self._compute_usage_health(all_attn_weights)
+        self._compute_entropy_health(all_attn_weights, begin_ends)
+        self._last_usage_concentration = usage_concentration
+        self._last_dead_slot_ratio = dead_slot_ratio
+        self._last_dead_slot_count = dead_slot_count
+        self._last_total_visible_slots = total_visible_slots
+        div_val = diversity_loss.item() if isinstance(diversity_loss, torch.Tensor) else float(diversity_loss)
+        sep_val = slot_sep_loss.item() if isinstance(slot_sep_loss, torch.Tensor) else float(slot_sep_loss)
+        self._last_flatline_flag = (div_val <= self._flatline_loss_eps and sep_val <= self._flatline_loss_eps)
+
         return mem_k, mem_v, diversity_loss, slot_sep_loss
+
+    def _update_slot_usage_ema(self, attn_weights_list: list):
+        """Update slot usage EMA for monitoring"""
+        if len(attn_weights_list) == 0:
+            return
+        with torch.no_grad():
+            S = self.slots_per_scale
+            for scale_idx, attn in attn_weights_list:
+                expected_slots = (scale_idx + 1) * S
+                if attn.size(-1) != expected_slots:
+                    continue
+                usage_flat = attn.mean(dim=(0, 1))
+                usage_by_scale = usage_flat.view(scale_idx + 1, S)
+                self.shared_usage_ema[:scale_idx + 1].mul_(self.ema_momentum).add_(
+                    usage_by_scale, alpha=1 - self.ema_momentum
+                )
+
+    def _compute_usage_health(self, attn_weights_list: list) -> Tuple[float, float, int, int]:
+        """Compute compact liveness diagnostics for trainer summary logging."""
+        if len(attn_weights_list) == 0:
+            return 0.0, 0.0, 0, 0
+
+        concentration_vals = []
+        dead_slots = 0
+        total_slots = 0
+
+        for _scale_idx, attn in attn_weights_list:
+            slot_usage = attn.mean(dim=(0, 1))
+            num_slots = slot_usage.numel()
+            if num_slots == 0:
+                continue
+            concentration_vals.append(float(slot_usage.max().detach().cpu()) * float(num_slots))
+            dead_slots += (slot_usage < self._dead_slot_eps).sum().item()
+            total_slots += num_slots
+
+        if total_slots == 0:
+            return 0.0, 0.0, 0, 0
+
+        usage_concentration = sum(concentration_vals) / max(len(concentration_vals), 1)
+        dead_slot_ratio = dead_slots / total_slots
+        return usage_concentration, dead_slot_ratio, dead_slots, total_slots
+
+    def _compute_entropy_health(self, attn_weights_list: list, begin_ends: List[Tuple[int, int]]) -> None:
+        """Compute entropy metrics from real forward attention weights."""
+        if len(attn_weights_list) == 0:
+            self._last_entropy_ratio_weighted = 0.0
+            self._last_entropy_dispersion = 0.0
+            self._last_effective_slot_usage_weighted = 0.0
+            self._last_max_attn_weighted = 0.0
+            self._last_entropy_ratio_per_scale = {}
+            return
+
+        with torch.no_grad():
+            entropy_ratios = []
+            effective_slots = []
+            max_attn_vals = []
+            token_weights = []
+            per_scale = {}
+
+            for scale_idx, attn in attn_weights_list:
+                if scale_idx >= len(begin_ends):
+                    continue
+                start, end = begin_ends[scale_idx]
+                token_count = max(end - start, 0)
+                if token_count <= 0:
+                    continue
+
+                num_slots = attn.shape[-1]
+                entropy = -(attn * torch.log(attn.clamp_min(1e-8))).sum(dim=-1).mean()
+                if num_slots > 1:
+                    entropy_ratio = (entropy / math.log(num_slots)).item()
+                else:
+                    entropy_ratio = 0.0
+
+                effective_slot_usage = math.exp(entropy.item())
+                max_attn = attn.max(dim=-1).values.mean().item()
+
+                entropy_ratios.append(entropy_ratio)
+                effective_slots.append(effective_slot_usage)
+                max_attn_vals.append(max_attn)
+                token_weights.append(float(token_count))
+
+                per_scale[f'scale_{scale_idx}'] = {
+                    'entropy_ratio': entropy_ratio,
+                    'effective_slot_usage': effective_slot_usage,
+                    'num_slots': int(num_slots),
+                    'token_count': int(token_count),
+                }
+
+            if not token_weights:
+                self._last_entropy_ratio_weighted = 0.0
+                self._last_entropy_dispersion = 0.0
+                self._last_effective_slot_usage_weighted = 0.0
+                self._last_max_attn_weighted = 0.0
+                self._last_entropy_ratio_per_scale = {}
+                return
+
+            weight_sum = sum(token_weights)
+            weighted_ratio = sum(r * w for r, w in zip(entropy_ratios, token_weights)) / weight_sum
+            weighted_eff_slots = sum(u * w for u, w in zip(effective_slots, token_weights)) / weight_sum
+            weighted_max_attn = sum(m * w for m, w in zip(max_attn_vals, token_weights)) / weight_sum
+            weighted_var = sum(((r - weighted_ratio) ** 2) * w for r, w in zip(entropy_ratios, token_weights)) / weight_sum
+
+            self._last_entropy_ratio_weighted = weighted_ratio
+            self._last_entropy_dispersion = math.sqrt(max(weighted_var, 0.0))
+            self._last_effective_slot_usage_weighted = weighted_eff_slots
+            self._last_max_attn_weighted = weighted_max_attn
+            self._last_entropy_ratio_per_scale = per_scale
 
     def _compute_diversity_loss(self, attn_weights_list: list) -> torch.Tensor:
         """多样性损失: hinge loss on max slot usage"""
@@ -436,6 +576,15 @@ class ClassAwareKnittingMemoryV2(nn.Module):
             all_shared = torch.cat(all_shared, dim=0)
             shared_norms = all_shared.norm(dim=-1)
 
+            # Compute slot similarity for shared memory
+            slots_normed = F.normalize(all_shared, dim=-1)
+            similarity = slots_normed @ slots_normed.T
+            mask = ~torch.eye(len(all_shared), dtype=torch.bool, device=similarity.device)
+            off_diag_sim = similarity[mask]
+
+            # Usage EMA stats
+            usage = self.shared_usage_ema.flatten().cpu().numpy()
+
             gk = torch.sigmoid(self.gk_logit).item()
             gv = torch.sigmoid(self.gv_logit).item()
             current_temp = self.get_current_temperature()
@@ -446,10 +595,24 @@ class ClassAwareKnittingMemoryV2(nn.Module):
                 'layer': self.block_idx,
                 'shared_norm_mean': shared_norms.mean().item(),
                 'shared_norm_std': shared_norms.std().item(),
+                'similarity_mean': off_diag_sim.mean().item(),
+                'similarity_std': off_diag_sim.std().item(),
+                'usage_mean': usage.mean(),
+                'usage_std': usage.std(),
                 'temperature': current_temp,
                 'gk_weight': gk,
                 'gv_weight': gv,
                 'cat_A_norm': self.cat_A.norm().item(),
+                'usage_concentration': self._last_usage_concentration,
+                'dead_slot_ratio': self._last_dead_slot_ratio,
+                'dead_slot_count': self._last_dead_slot_count,
+                'total_visible_slots': self._last_total_visible_slots,
+                'flatline': bool(self._last_flatline_flag),
+                'entropy_ratio_weighted': self._last_entropy_ratio_weighted,
+                'entropy_dispersion': self._last_entropy_dispersion,
+                'effective_slot_usage_weighted': self._last_effective_slot_usage_weighted,
+                'max_attn_weighted': self._last_max_attn_weighted,
+                'entropy_ratio_per_scale': self._last_entropy_ratio_per_scale,
             }
 
     def extra_repr(self) -> str:
