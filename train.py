@@ -624,17 +624,22 @@ def main_training():
             print(f' [*] [ep{ep}]  (val {tot})  Lm: {val_loss_mean:.4f}, Lt: {val_loss_tail:.4f}, Acc m&t: {val_acc_mean:.2f} {val_acc_tail:.2f},  Val cost: {cost:.2f}s')
             
             if dist.is_local_master():
+                current_epoch = ep + 1
                 local_out_ckpt = os.path.join(args.local_out_dir_path, 'ar-ckpt-last.pth')
                 local_out_ckpt_best = os.path.join(args.local_out_dir_path, 'ar-ckpt-best.pth')
+                snapshot_epochs = {30, 40, 50, 60}
                 print(f'[saving ckpt] ...', end='', flush=True)
                 torch.save({
-                    'epoch':    ep+1,
+                    'epoch':    current_epoch,
                     'iter':     0,
                     'trainer':  trainer.state_dict(),
                     'args':     args.state_dict(),
                 }, local_out_ckpt)
                 if best_updated:
                     shutil.copy(local_out_ckpt, local_out_ckpt_best)
+                if current_epoch in snapshot_epochs:
+                    snapshot_ckpt = os.path.join(args.local_out_dir_path, f'ar-ckpt-ep{current_epoch}.pth')
+                    shutil.copy(local_out_ckpt, snapshot_ckpt)
                 print(f'     [saving ckpt](*) finished!  @ {local_out_ckpt}', flush=True, clean=True)
             dist.barrier()
         

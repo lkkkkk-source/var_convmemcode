@@ -373,14 +373,12 @@ def compute_per_class_fid(args, generated_images_by_class, real_images_by_class,
                 'num_real': len(selected_real_paths),
             }
 
-    if os.path.exists(temp_root):
-        shutil.rmtree(temp_root)
-
     per_class_fid_path = os.path.join(output_dir, 'per_class_fid.json')
     with open(per_class_fid_path, 'w', encoding='utf-8') as f:
         json.dump(per_class_results, f, ensure_ascii=False, indent=2)
 
     print(f"💾 每类别FID结果已保存到: {per_class_fid_path}")
+    print(f"💾 per-class FID临时目录已保留: {temp_root}")
     return per_class_results
 
 
