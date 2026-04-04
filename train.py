@@ -131,6 +131,17 @@ def _freeze_texture_modules(var_model) -> int:
     return frozen_count
 
 
+def _freeze_non_memory_params(var_model) -> int:
+    frozen_count = 0
+    for name, para in var_model.named_parameters():
+        if 'knitting_memory' in name:
+            continue
+        if para.requires_grad:
+            para.requires_grad = False
+            frozen_count += 1
+    return frozen_count
+
+
 def _configure_shared_memory_stage(var_model, shared_only: bool) -> int:
     affected = 0
     residual_keywords = ('cat_A', 'cat_B', 'alpha_mlp', 'category_embedding', 'scale_embedding')
@@ -363,6 +374,10 @@ def build_everything(args: arg_util.Args):
         print(f'[INIT][Stage] Enabled shared-memory-only mode; disabled class residual params: {affected_count}.')
     else:
         _configure_shared_memory_stage(var_wo_ddp, shared_only=False)
+
+    if args.freeze_non_memory:
+        frozen_non_memory_count = _freeze_non_memory_params(var_wo_ddp)
+        print(f'[INIT][Stage] Frozen non-memory parameters: {frozen_non_memory_count} parameters.')
 
     # Note: find_unused_parameters=True is needed because:
     # 1. Texture enhancement is only enabled in some layers (second half by default)

@@ -113,6 +113,7 @@ class Args(Tap):
     pretrained_ckpt: str = './var_d16.pth'      # path to pretrained VAR checkpoint (e.g., ImageNet pretrained)
     freeze_layers: str = '0_7'     # layers to freeze, e.g., '0_7' freezes layers 0-7 (first half, keep new modules trainable)
     freeze_texture: bool = False   # staged training: freeze texture modules even if their host blocks stay trainable
+    freeze_non_memory: bool = False  # staged training: freeze all non-memory params for strict memory-only optimization
     finetune_lr_scale: float = 0.1 # lr scale for backbone (non-new) parameters during fine-tuning
 
     # Data augmentation
