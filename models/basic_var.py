@@ -112,7 +112,7 @@ class SelfAttention(nn.Module):
 
         self.caching, self.cached_k, self.cached_v = False, None, None
 
-        # ========== Axial + 2D texture enhancement branch ==========
+        # ========== Axial texture enhancement branch ==========
         self.enable_texture = enable_texture
         if enable_texture:
             self.texture_scales = texture_scales
@@ -134,7 +134,6 @@ class SelfAttention(nn.Module):
             self._dilations = [1, 2, 3, 4]
             self.row_ops = nn.ModuleDict()
             self.col_ops = nn.ModuleDict()
-            self.diag_ops = nn.ModuleDict()  # V2: 2D depthwise conv branch
 
             def _make_dw_pw(channels, k_h, k_w, dil_h, dil_w, pad_mode=padding_mode):
                 pad_h = (k_h // 2) * dil_h
@@ -159,18 +158,15 @@ class SelfAttention(nn.Module):
                     eff_k = max(3, (k // r) | 1)
                     self.row_ops[key] = _make_dw_pw(conv_channels, 1, eff_k, 1, r)
                     self.col_ops[key] = _make_dw_pw(conv_channels, eff_k, 1, r, 1)
-                    # V2: 2D depthwise conv (diagonal/full 2D structure)
-                    self.diag_ops[key] = _make_dw_pw(conv_channels, eff_k, eff_k, r, r)
 
             if block_idx == (depth // 2):  # Print for first enabled layer
-                print(f"  [Texture Operators V2] Created {len(self.row_ops)} row/col/diag operator triplets:")
+                print(f"  [Texture Operators V2] Created {len(self.row_ops)} row/col operator pairs:")
                 print(f"    Keys: {sorted(self.row_ops.keys())}")
                 print(f"    padding_mode=circular")
 
-            # Gates: row, col, diag
+            # Gates: row, col
             self.row_gates = nn.Linear(self.head_dim, len(texture_scales))
             self.col_gates = nn.Linear(self.head_dim, len(texture_scales))
-            self.diag_gates = nn.Linear(self.head_dim, len(texture_scales))
 
             # Progressive gate initialization
             if depth > 1:
@@ -180,7 +176,7 @@ class SelfAttention(nn.Module):
 
             self.texture_gate_logit = nn.Parameter(torch.full((1, num_heads, 1, 1), init_logit))
 
-            for m in [self.row_gates, self.col_gates, self.diag_gates]:
+            for m in [self.row_gates, self.col_gates]:
                 nn.init.normal_(m.weight, std=0.01)
                 nn.init.zeros_(m.bias)
 
@@ -193,7 +189,7 @@ class SelfAttention(nn.Module):
 
             print(f"  [Texture Layer {block_idx}] init_gate_logit={init_logit:.3f} "
                   f"(sigmoid={torch.sigmoid(torch.tensor(init_logit)).item():.3f}), "
-                  f"mode=kv_modulation+circular+2d_branch")
+                  f"mode=kv_modulation+circular+axial_only")
 
         # ========== Knitting Pattern Memory ==========
         self.enable_memory = enable_memory
@@ -279,7 +275,7 @@ class SelfAttention(nn.Module):
                 self._texture_plan.append(None)
                 continue
 
-            row_plan, col_plan, diag_plan = [], [], []
+            row_plan, col_plan = [], []
             for idx, k in enumerate(self.texture_scales):
                 if k not in active_kernels:
                     continue
@@ -288,13 +284,11 @@ class SelfAttention(nn.Module):
                     row_plan.append((self.row_ops[op_key], idx))
                 if op_key in self.col_ops and self._validate_padding(self.col_ops[op_key], pn):
                     col_plan.append((self.col_ops[op_key], idx))
-                if op_key in self.diag_ops and self._validate_padding(self.diag_ops[op_key], pn):
-                    diag_plan.append((self.diag_ops[op_key], idx))
 
-            if not (row_plan or col_plan or diag_plan):
+            if not (row_plan or col_plan):
                 self._texture_plan.append(None)
                 continue
-            self._texture_plan.append((pn, start_idx, end_idx, row_plan, col_plan, diag_plan))
+            self._texture_plan.append((pn, start_idx, end_idx, row_plan, col_plan))
 
     def _compute_texture_modulation(
         self,
@@ -303,7 +297,7 @@ class SelfAttention(nn.Module):
     ) -> torch.Tensor:
         """
         Compute texture features from input, returning [B, L, C] modulation.
-        Uses row + col + diag branches with per-scale kernel selection.
+        Uses row + col branches with per-scale kernel selection.
         """
         B, L, C = x_BLC.shape
         H, c = self.num_heads, self.head_dim
@@ -320,7 +314,7 @@ class SelfAttention(nn.Module):
         for plan_entry in self._texture_plan:
             if plan_entry is None:
                 continue
-            pn, start_idx, end_idx, row_plan, col_plan, diag_plan = plan_entry
+            pn, start_idx, end_idx, row_plan, col_plan = plan_entry
 
             if end_idx > L:
                 continue
@@ -339,10 +333,8 @@ class SelfAttention(nn.Module):
             row_indices = [idx for _, idx in row_plan]
             col_features = [op(scale_2d)[:, :, :pn, :pn] for op, _ in col_plan]
             col_indices = [idx for _, idx in col_plan]
-            diag_features = [op(scale_2d)[:, :, :pn, :pn] for op, _ in diag_plan]
-            diag_indices = [idx for _, idx in diag_plan]
 
-            if not (row_features or col_features or diag_features):
+            if not (row_features or col_features):
                 continue
 
             # Compute global feature for gating
@@ -364,10 +356,9 @@ class SelfAttention(nn.Module):
 
             row_mix = _weighted_mix(row_features, row_indices, self.row_gates)
             col_mix = _weighted_mix(col_features, col_indices, self.col_gates)
-            diag_mix = _weighted_mix(diag_features, diag_indices, self.diag_gates)
 
-            # Combine: row + col + diag
-            enhanced_2d = row_mix + col_mix + diag_mix
+            # Combine: row + col
+            enhanced_2d = row_mix + col_mix
 
             if self.texture_per_head_kernels:
                 enhanced_2d = enhanced_2d.reshape(B, H, c, pn, pn)
