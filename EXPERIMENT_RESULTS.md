@@ -2,7 +2,7 @@
 
 ## TL;DR
 
-- Current best confirmed result: **v2.2 class-aware rank2 mem8_12 @ cfg=4.5 → FID 42.6843, KID 0.008637**
+- Current best confirmed result: <span style="color:#d14; font-weight:700;">v2.2 class-aware rank2 mem8_12 @ cfg=4.5 → FID 42.6843, KID 0.008637</span>
 - Best previous mainline: **v2.0 cyclic_shift @ cfg=4.5 → FID 44.18, KID 0.00890**
 - Key conclusion: **class-aware memory is useful, but rank=4 was too strong; lowering to rank=2 improved FID and preserved the idea**
 - Current next step: **v2.3 = keep `mem_layers=8_12` and test `mem_cat_rank=1`**
@@ -41,8 +41,9 @@
 | v2.0 | 4.5 | ✓ | ✓ | `cyclic_shift=True` | 44.18 | 0.00890 | confirmed | first confirmed v2 improvement over v1.5@4.5 |
 | v2.1 rank4 | 4.5 | ✓ | ✓ | class-aware memory, `cat_rank=4` | 46.7636 | 0.010353 | confirmed | innovation too strong; regressed badly |
 | v2.1 rank2 | 4.5 | ✓ | ✓ | class-aware memory, `cat_rank=2` | **43.9799** | **0.009177** | **confirmed best @ cfg=4.5** | current best confirmed mainline |
-| v2.2 rank2 mem8_12 | 4.5 | ✓ | ✓ | `cat_rank=2`, `mem_layers=8_12` | **42.6843** | **0.008637** | **confirmed best @ cfg=4.5** | current best confirmed mainline |
-| v2.3 rank1 mem8_12 | 4.5 | ✓ | ✓ | `cat_rank=1`, `mem_layers=8_12` | pending | pending | planned | next experiment |
+| <span style="color:#d14; font-weight:700;">v2.2 rank2 mem8_12</span> | 4.5 | ✓ | ✓ | `cat_rank=2`, `mem_layers=8_12` | <span style="color:#d14; font-weight:700;">42.6843</span> | <span style="color:#d14; font-weight:700;">0.008637</span> | <span style="color:#d14; font-weight:700;">confirmed best @ cfg=4.5</span> | current best confirmed mainline |
+| v2.3 rank1 mem8_12 warmup50 | 4.5 | ✓ | ✓ | `cat_rank=1`, `mem_layers=8_12`, `mem_temp_warmup=50` | 45.1522 | 0.010480 | confirmed regression | rank1 + late warmup underperformed badly |
+| v2.3 rank1 mem8_12 warmup30 | 4.5 | ✓ | ✓ | `cat_rank=1`, `mem_layers=8_12`, `mem_temp_warmup=30` | pending | pending | planned | next experiment |
 
 ---
 
@@ -68,7 +69,7 @@
 
 ### Current decision
 
-> **Adopt `v2.2 class-aware rank2 mem8_12` as the new mainline baseline for cfg=4.5 experiments.**
+> <span style="color:#d14; font-weight:700;">Adopt `v2.2 class-aware rank2 mem8_12` as the new mainline baseline for cfg=4.5 experiments.</span>
 
 ---
 
@@ -146,13 +147,38 @@ Per-class comparison takeaways:
 - `class 1` and `class 5` remain the hardest classes
 - overall gain is broad enough to trust the total FID improvement
 
+### v2.3 rank1 mem8_12 warmup50 — failed ablation
+
+- Change: reduce `cat_rank` from 2 → 1 while keeping `mem_layers=8_12`, with `mem_temp_warmup=50`
+- Result: **FID 45.1522, KID 0.010480**
+- Interpretation: this is clearly worse than `v2.2`; the regression is too large to treat as simple noise
+- Likely reading: `rank1` may be too weak, and/or `warmup=50` stabilizes memory too late for this training window
+- Decision: **do not adopt this configuration; continue with `warmup30` test before ruling out rank1 entirely**
+
+Per-class FID (`v2.3 rank1 mem8_12 warmup50`):
+
+| Class | FID |
+|---|---:|
+| 0 | 102.53 |
+| 1 | 118.80 |
+| 2 | 99.43 |
+| 3 | 90.72 |
+| 4 | 89.85 |
+| 5 | 105.53 |
+
+Per-class comparison takeaways:
+
+- `class 1` improved relative to `v2.2`
+- but `class 0`, `class 2`, and `class 4` regressed enough to hurt total FID badly
+- this looks more like a poor configuration than a purely late-stage overfitting artifact
+
 ---
 
 ## Current Best Recipes
 
 ### Best confirmed @ cfg=4.5
 
-**Run:** `v2.2 class-aware rank2 mem8_12`
+**Run:** <span style="color:#d14; font-weight:700;">`v2.2 class-aware rank2 mem8_12`</span>
 
 Core settings:
 
@@ -175,17 +201,17 @@ Core settings:
 
 ## Next Experiment
 
-### v2.3 — `mem_cat_rank=1` on `mem_layers=8_12`
+### v2.3 — `mem_cat_rank=1` on `mem_layers=8_12` with `warmup30`
 
 Goal:
 
 - Keep the successful `mem_layers=8_12` placement
-- Test whether class-aware residual can be made even lighter while preserving the v2.2 gain
+- Re-test `rank1` under a shorter memory warmup, since `warmup50` looked too late for this training budget
 
 Planned training identity:
 
-- `exp_name = fined_v2.3_classaware_rank1_mem8_12`
-- log file = `./logs/fined_v2.3_classaware_rank1_mem8_12.log`
+- `exp_name = fined_v2.3_classaware_rank1_mem8_12_warm30`
+- log file = `./logs/fined_v2.3_classaware_rank1_mem8_12_warm30.log`
 
 Decision rule:
 
@@ -201,6 +227,8 @@ Decision rule:
 - `logs/fined_v2.1_classaware.log` — v2.1 rank4 training log
 - `logs/fined_v2.1_classaware_rank2_bs24.log` — v2.1 rank2 training log
 - `logs/fined_v2.2_classaware_rank2_mem8_12.log` — v2.2 training log
+- `logs/fined_v2.3_classaware_rank1_mem8_12.log` — v2.3 rank1 warmup50 training log
 - `evaluation_results/fined_v2.1_classaware_cfg4.5/` — v2.1 rank4 eval outputs
 - `evaluation_results/fined_v2.1_classaware_rank2_bs24_cfg4.5/` — v2.1 rank2 eval outputs
 - `evaluation_results/fined_v2.2_classaware_rank2_mem8_12_cfg4.5/` — v2.2 eval outputs
+- `evaluation_results/fined_v2.3_classaware_rank1_mem8_12_cfg4.5/` — v2.3 rank1 warmup50 eval outputs
