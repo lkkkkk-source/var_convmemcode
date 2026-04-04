@@ -100,6 +100,7 @@ class Args(Tap):
     mem_class_aware: bool = False  # whether to use class-aware memory (ClassAwareKnittingMemory)
     mem_num_categories: int = 22   # number of categories for class-aware memory
     mem_cat_rank: int = 4          # low-rank residual rank for class-aware memory
+    mem_shared_only: bool = False  # staged training: disable class residual branch, train shared memory only
 
     # Structural losses
     seam_weight: float = 0.02      # seam loss weight
@@ -111,6 +112,7 @@ class Args(Tap):
     # Fine-tuning from pretrained
     pretrained_ckpt: str = './var_d16.pth'      # path to pretrained VAR checkpoint (e.g., ImageNet pretrained)
     freeze_layers: str = '0_7'     # layers to freeze, e.g., '0_7' freezes layers 0-7 (first half, keep new modules trainable)
+    freeze_texture: bool = False   # staged training: freeze texture modules even if their host blocks stay trainable
     finetune_lr_scale: float = 0.1 # lr scale for backbone (non-new) parameters during fine-tuning
 
     # Data augmentation

@@ -145,6 +145,7 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         self._slot_sep_cache = None
         self._forward_count = 0
         self._slot_sep_interval = 10
+        self.class_residual_enabled = True
 
         # Stats
         total_shared_params = num_scales * shared_patterns * shared_memory_size * embed_dim
@@ -181,6 +182,9 @@ class ClassAwareKnittingMemoryV2(nn.Module):
 
     def freeze_learnable_temperature(self):
         self.log_temperature.requires_grad_(False)
+
+    def set_class_residual_enabled(self, enabled: bool):
+        self.class_residual_enabled = bool(enabled)
 
     def _get_cat_memory(self, cat_id: int, scale_idx: int) -> torch.Tensor:
         """
@@ -291,13 +295,15 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         shared_keys_all = self.key_proj(shared_mem_stacked)    # [num_scales, slots, C]
         shared_values_all = self.value_proj(shared_mem_stacked)  # [num_scales, slots, C]
 
-        # 3. 确定是否使用类别记忆
-        use_category = category_ids is not None
-        has_valid_category = use_category and (category_ids >= 0).any()
-
         # Handle None case by creating a default tensor
         if category_ids is None:
             category_ids = torch.full((B,), -1, device=x.device, dtype=torch.long)
+        assert category_ids is not None
+        cat_ids = category_ids
+
+        # 3. 确定是否使用类别记忆
+        use_category = (cat_ids >= 0).any()
+        has_valid_category = self.class_residual_enabled and use_category
 
         # 4. 逐尺度检索
         mem_combined = torch.zeros_like(x)  # [B, L, C]
@@ -326,8 +332,8 @@ class ClassAwareKnittingMemoryV2(nn.Module):
 
             # 7. 类别分支检索 (批量向量化，消除逐样本循环)
             if has_valid_category:
-                valid_mask = (category_ids >= 0)  # [B]
-                safe_cat_ids = category_ids.clamp(min=0)  # [B], invalid→0 as dummy
+                valid_mask = (cat_ids >= 0)  # [B]
+                safe_cat_ids = cat_ids.clamp(min=0)  # [B], invalid→0 as dummy
 
                 # 找唯一类别，批量计算低秩记忆
                 unique_cats, inverse_idx = torch.unique(safe_cat_ids, return_inverse=True)
@@ -588,7 +594,7 @@ class ClassAwareKnittingMemoryV2(nn.Module):
             gk = torch.sigmoid(self.gk_logit).item()
             gv = torch.sigmoid(self.gv_logit).item()
             current_temp = self.get_current_temperature()
-            if isinstance(current_temp, torch.Tensor):
+            if torch.is_tensor(current_temp):
                 current_temp = current_temp.item()
 
             return {
@@ -602,6 +608,7 @@ class ClassAwareKnittingMemoryV2(nn.Module):
                 'temperature': current_temp,
                 'gk_weight': gk,
                 'gv_weight': gv,
+                'class_residual_enabled': bool(self.class_residual_enabled),
                 'cat_A_norm': self.cat_A.norm().item(),
                 'usage_concentration': self._last_usage_concentration,
                 'dead_slot_ratio': self._last_dead_slot_ratio,

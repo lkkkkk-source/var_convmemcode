@@ -121,6 +121,35 @@ def _freeze_backbone_layers(var_model, freeze_layers: List[int]) -> int:
     return frozen_count
 
 
+def _freeze_texture_modules(var_model) -> int:
+    texture_keywords = ('texture_', 'row_', 'col_', 'diag_', 'tex_')
+    frozen_count = 0
+    for name, para in var_model.named_parameters():
+        if any(k in name for k in texture_keywords) and para.requires_grad:
+            para.requires_grad = False
+            frozen_count += 1
+    return frozen_count
+
+
+def _configure_shared_memory_stage(var_model, shared_only: bool) -> int:
+    affected = 0
+    residual_keywords = ('cat_A', 'cat_B', 'alpha_mlp', 'category_embedding', 'scale_embedding')
+
+    for module in var_model.modules():
+        if hasattr(module, 'set_class_residual_enabled'):
+            module.set_class_residual_enabled(not shared_only)
+
+    for name, para in var_model.named_parameters():
+        if 'knitting_memory' not in name:
+            continue
+        if any(k in name for k in residual_keywords):
+            should_train = not shared_only
+            if para.requires_grad != should_train:
+                para.requires_grad = should_train
+                affected += 1
+    return affected
+
+
 def _apply_finetune_lr_scale(
     para_groups: List[dict],
     pretrained_param_ids: Set[int],
@@ -324,6 +353,16 @@ def build_everything(args: arg_util.Args):
         print(f'[INIT][Finetune] Frozen backbone params in blocks {freeze_layers}: {frozen_count} parameters.')
     elif freeze_layers:
         print('[INIT][Finetune][WARN] freeze_layers is set but pretrained weights are not loaded; skip freezing.')
+
+    if args.freeze_texture:
+        frozen_texture_count = _freeze_texture_modules(var_wo_ddp)
+        print(f'[INIT][Stage] Frozen texture parameters: {frozen_texture_count} parameters.')
+
+    if args.mem_shared_only:
+        affected_count = _configure_shared_memory_stage(var_wo_ddp, shared_only=True)
+        print(f'[INIT][Stage] Enabled shared-memory-only mode; disabled class residual params: {affected_count}.')
+    else:
+        _configure_shared_memory_stage(var_wo_ddp, shared_only=False)
 
     # Note: find_unused_parameters=True is needed because:
     # 1. Texture enhancement is only enabled in some layers (second half by default)
