@@ -1,0 +1,25 @@
+=================== VAR_convMem 评估结果汇总 ===================
+Model Depth: 16
+Seed: 0
+Generated Samples: 8700
+CFG Scale: 4.0
+Top-k: 900
+Top-p: 0.96
+Num Classes: 6
+
+🎨 VAR_convMem 特性:
+  Texture Enhancement: True
+    - Scales: [3, 5, 7, 11]
+    - Enable Layers: [12, 13, 14, 15]
+    - Per-head Kernels: False
+  Pattern Memory: True
+    - Num Patterns: 4
+    - Memory Size: 4
+    - Enable Layers: [12]
+
+📊 图像质量指标:
+  FID Score: 45.3145
+  KID Score: 0.009945
+  LPIPS: 0.7877 ± 0.1474
+  SSIM: 0.0617 ± 0.0498
+================================================================
