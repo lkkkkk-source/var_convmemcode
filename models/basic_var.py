@@ -184,16 +184,14 @@ class SelfAttention(nn.Module):
                 nn.init.normal_(m.weight, std=0.01)
                 nn.init.zeros_(m.bias)
 
-            # V2: texture modulates K/V (and Q with small coeff) via low-rank projections
+            # V2-lite: texture modulates K/V via low-rank projections
             tex_rank = 64
             self.Wk_tex = nn.Sequential(nn.Linear(embed_dim, tex_rank, bias=False), nn.Linear(tex_rank, embed_dim, bias=False))
             self.Wv_tex = nn.Sequential(nn.Linear(embed_dim, tex_rank, bias=False), nn.Linear(tex_rank, embed_dim, bias=False))
-            self.Wq_tex = nn.Sequential(nn.Linear(embed_dim, tex_rank, bias=False), nn.Linear(tex_rank, embed_dim, bias=False))
-            self.tex_q_coeff = 0.3  # Q gets smaller texture modulation
 
             print(f"  [Texture Layer {block_idx}] init_gate_logit={init_logit:.3f} "
                   f"(sigmoid={torch.sigmoid(torch.tensor(init_logit)).item():.3f}), "
-                  f"mode=kv_modulation+circular+2d_branch")
+                  f"mode=kv_only_modulation+circular+2d_branch")
 
         # ========== Knitting Pattern Memory ==========
         self.enable_memory = enable_memory
@@ -418,33 +416,28 @@ class SelfAttention(nn.Module):
             k = k + mem_k_shaped
             v = v + mem_v_shaped
 
-        # ========== Texture K/V modulation (V2: modulates K/V via projections) ==========
+        # ========== Texture K/V modulation (V2-lite: modulates K/V only) ==========
         if self.enable_texture and begin_ends is not None:
             tex_feat = self._compute_texture_modulation(x, begin_ends)  # [B, L, C]
             texture_weight = torch.sigmoid(self.texture_gate_logit)  # [1, H, 1, 1]
 
-            # Project texture features to K/V/Q space
+            # Project texture features to K/V space
             tex_k = self.Wk_tex(tex_feat)  # [B, L, C]
             tex_v = self.Wv_tex(tex_feat)
-            tex_q = self.Wq_tex(tex_feat)
 
             if using_flash or self.using_xform:
                 # shapes: [B, L, H, c]
                 tex_k_shaped = tex_k.view(B, L, self.num_heads, self.head_dim)
                 tex_v_shaped = tex_v.view(B, L, self.num_heads, self.head_dim)
-                tex_q_shaped = tex_q.view(B, L, self.num_heads, self.head_dim)
                 tw = texture_weight.permute(0, 2, 1, 3)  # [1, 1, H, 1]
                 k = k + tw * tex_k_shaped
                 v = v + tw * tex_v_shaped
-                q = q + self.tex_q_coeff * tw * tex_q_shaped
             else:
                 # shapes: [B, H, L, c]
                 tex_k_shaped = tex_k.view(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
                 tex_v_shaped = tex_v.view(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-                tex_q_shaped = tex_q.view(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
                 k = k + texture_weight * tex_k_shaped
                 v = v + texture_weight * tex_v_shaped
-                q = q + self.tex_q_coeff * texture_weight * tex_q_shaped
 
         if self.attn_l2_norm:
             scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
