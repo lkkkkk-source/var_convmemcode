@@ -1,0 +1,38 @@
+{
+  "0": {
+    "fid": 89.11945155690634,
+    "reason": null,
+    "num_generated": 1450,
+    "num_real": 954
+  },
+  "1": {
+    "fid": 142.6346166304391,
+    "reason": null,
+    "num_generated": 1450,
+    "num_real": 1450
+  },
+  "2": {
+    "fid": 82.70960740743897,
+    "reason": null,
+    "num_generated": 1450,
+    "num_real": 1450
+  },
+  "3": {
+    "fid": 85.72766422815747,
+    "reason": null,
+    "num_generated": 1450,
+    "num_real": 1450
+  },
+  "4": {
+    "fid": 78.79274008306672,
+    "reason": null,
+    "num_generated": 1450,
+    "num_real": 1450
+  },
+  "5": {
+    "fid": 109.55212780791834,
+    "reason": null,
+    "num_generated": 1450,
+    "num_real": 1308
+  }
+}
