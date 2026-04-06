@@ -23,6 +23,7 @@ setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)
 setattr(torch.nn.LayerNorm, 'reset_parameters', lambda self: None)
 
 from models import VQVAE, build_vae_var
+from models.patch_realism_scorer import PatchRealismScorer
 
 ################## 参数解析
 
@@ -56,6 +57,18 @@ parser.add_argument('--batch_size', type=int, default=50,
                     help='Batch size for generation')
 parser.add_argument('--demo_only', action='store_true',
                     help='Only generate demo images without calculating FID')
+parser.add_argument('--enable_learned_local_prior', action='store_true',
+                    help='Enable learned patch realism prior reranking during generation')
+parser.add_argument('--local_prior_ckpt', type=str, default='',
+                    help='Checkpoint path for learned patch realism scorer')
+parser.add_argument('--local_prior_weight', type=float, default=1.0,
+                    help='Weight multiplier for learned local prior scores')
+parser.add_argument('--local_prior_candidates', type=int, default=1,
+                    help='Number of candidate images to generate per label')
+parser.add_argument('--local_prior_patch_size', type=int, default=64,
+                    help='Patch size used by learned patch realism scorer')
+parser.add_argument('--local_prior_num_patches', type=int, default=8,
+                    help='Number of random patches scored per generated image')
 
 # VAR_convMem 特定参数 - 纹理增强
 parser.add_argument('--enable_texture', action='store_true',
@@ -125,6 +138,13 @@ print(f"  --num_samples: {args.num_samples}")
 print(f"  --batch_size: {args.batch_size}")
 print(f"  --top_k: {args.top_k}")
 print(f"  --top_p: {args.top_p}")
+print(f"  --enable_learned_local_prior: {args.enable_learned_local_prior}")
+if args.enable_learned_local_prior:
+    print(f"  --local_prior_ckpt: {args.local_prior_ckpt}")
+    print(f"  --local_prior_weight: {args.local_prior_weight}")
+    print(f"  --local_prior_candidates: {args.local_prior_candidates}")
+    print(f"  --local_prior_patch_size: {args.local_prior_patch_size}")
+    print(f"  --local_prior_num_patches: {args.local_prior_num_patches}")
 
 # 路径参数
 print("\n📂 路径参数:")
@@ -246,6 +266,43 @@ def calculate_ssim(generated_images, real_images, sample_size=500):
     else:
         print("❌ SSIM计算失败")
         return None, None
+
+
+def build_local_prior_model(device='cuda'):
+    if not args.enable_learned_local_prior:
+        return None
+    if not args.local_prior_ckpt:
+        raise ValueError('--enable_learned_local_prior requires --local_prior_ckpt')
+
+    ckpt = torch.load(args.local_prior_ckpt, map_location=device)
+    model = PatchRealismScorer().to(device)
+    state = ckpt.get('model', ckpt)
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    print(f"✅ Learned local prior loaded from: {args.local_prior_ckpt}")
+    return model
+
+
+def score_batch_with_local_prior(model, images_B3HW, patch_size=64, num_patches=8):
+    if model is None:
+        return torch.zeros(images_B3HW.shape[0], device=images_B3HW.device)
+
+    B, C, H, W = images_B3HW.shape
+    scores = []
+    for bi in range(B):
+        img = images_B3HW[bi]
+        patch_scores = []
+        for _ in range(num_patches):
+            if H <= patch_size or W <= patch_size:
+                patch = F.interpolate(img.unsqueeze(0), size=(patch_size, patch_size), mode='bilinear', align_corners=False)
+            else:
+                top = random.randint(0, H - patch_size)
+                left = random.randint(0, W - patch_size)
+                patch = img[:, top:top + patch_size, left:left + patch_size].unsqueeze(0)
+            with torch.no_grad():
+                patch_scores.append(model(patch).squeeze(0))
+        scores.append(torch.stack(patch_scores).mean())
+    return torch.stack(scores)
 
 
 def pil_loader_rgb(path):
@@ -494,6 +551,7 @@ if args.enable_memory:
     print("✅ Memory temperature 设置为 0.15")
 
 print("✅ 模型准备完成")
+local_prior_model = build_local_prior_model(device=device)
 
 ################## 2. 生成演示图像
 
@@ -532,11 +590,31 @@ try:
     with torch.inference_mode():
         with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
             print("🎨 正在生成图像...")
-            recon_B3HW = var.autoregressive_infer_cfg(
-                B=B, label_B=label_B,
-                cfg=cfg, top_k=args.top_k, top_p=args.top_p,
-                g_seed=seed, more_smooth=more_smooth
-            )
+            if local_prior_model is None or args.local_prior_candidates <= 1:
+                recon_B3HW = var.autoregressive_infer_cfg(
+                    B=B, label_B=label_B,
+                    cfg=cfg, top_k=args.top_k, top_p=args.top_p,
+                    g_seed=seed, more_smooth=more_smooth
+                )
+            else:
+                cand_imgs = []
+                cand_scores = []
+                for ci in range(args.local_prior_candidates):
+                    cand = var.autoregressive_infer_cfg(
+                        B=B, label_B=label_B,
+                        cfg=cfg, top_k=args.top_k, top_p=args.top_p,
+                        g_seed=seed + ci, more_smooth=more_smooth
+                    )
+                    score = score_batch_with_local_prior(
+                        local_prior_model, cand,
+                        patch_size=args.local_prior_patch_size,
+                        num_patches=args.local_prior_num_patches,
+                    ) * args.local_prior_weight
+                    cand_imgs.append(cand)
+                    cand_scores.append(score)
+                score_stack = torch.stack(cand_scores, dim=0)
+                best_idx = score_stack.argmax(dim=0)
+                recon_B3HW = torch.stack([cand_imgs[best_idx[i].item()][i] for i in range(B)], dim=0)
 
     print("✅ 图像生成完成")
 
@@ -636,14 +714,34 @@ for batch_idx in range(num_batches):
     try:
         with torch.inference_mode():
             with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
-                generated_batch = var.autoregressive_infer_cfg(
-                    B=current_batch_size, label_B=label_batch,
-                    cfg=cfg, top_k=args.top_k, top_p=args.top_p,
-                    g_seed=current_seed, more_smooth=more_smooth
-                )
+                if local_prior_model is None or args.local_prior_candidates <= 1:
+                    generated_batch = var.autoregressive_infer_cfg(
+                        B=current_batch_size, label_B=label_batch,
+                        cfg=cfg, top_k=args.top_k, top_p=args.top_p,
+                        g_seed=current_seed, more_smooth=more_smooth
+                    )
+                else:
+                    cand_imgs = []
+                    cand_scores = []
+                    for ci in range(args.local_prior_candidates):
+                        cand = var.autoregressive_infer_cfg(
+                            B=current_batch_size, label_B=label_batch,
+                            cfg=cfg, top_k=args.top_k, top_p=args.top_p,
+                            g_seed=current_seed + ci, more_smooth=more_smooth
+                        )
+                        score = score_batch_with_local_prior(
+                            local_prior_model, cand,
+                            patch_size=args.local_prior_patch_size,
+                            num_patches=args.local_prior_num_patches,
+                        ) * args.local_prior_weight
+                        cand_imgs.append(cand)
+                        cand_scores.append(score)
+                    score_stack = torch.stack(cand_scores, dim=0)
+                    best_idx = score_stack.argmax(dim=0)
+                    generated_batch = torch.stack([cand_imgs[best_idx[i].item()][i] for i in range(current_batch_size)], dim=0)
 
         # 每个批次后种子递增，确保不同且连续
-        current_seed += 1
+        current_seed += max(args.local_prior_candidates, 1)
 
         # 保存单个图像
         for i in range(current_batch_size):
