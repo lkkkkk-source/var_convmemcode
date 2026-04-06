@@ -208,12 +208,105 @@ class VAR(nn.Module):
         else:                               # fused_add_norm is not used
             h = h_or_h_and_residual
         return self.head(self.head_nm(h.float(), cond_BD).float()).float()
+
+    @staticmethod
+    def _build_local_prior_context(idx_map: torch.Tensor, emb_weight: torch.Tensor) -> torch.Tensor:
+        """Build simple knit-aware local context from left/up/second-order neighbors.
+        idx_map: [B, pn, pn]
+        emb_weight: [V, Cvae]
+        returns: [B, pn, pn, Cvae]
+        """
+        B, pn, _ = idx_map.shape
+        Cvae = emb_weight.shape[1]
+        ctx = emb_weight.new_zeros(B, pn, pn, Cvae)
+        cnt = emb_weight.new_zeros(B, pn, pn, 1)
+
+        def add_neighbor(src_i, src_j, dst_i, dst_j, weight: float):
+            if src_i.numel() == 0:
+                return
+            vals = emb_weight[idx_map[:, src_i, src_j]] * weight
+            ctx[:, dst_i, dst_j] += vals
+            cnt[:, dst_i, dst_j] += weight
+
+        # first-order course / wale neighbors
+        if pn > 1:
+            r = torch.arange(pn, device=idx_map.device)
+            c = torch.arange(1, pn, device=idx_map.device)
+            add_neighbor(r[:, None].expand(pn, pn - 1).reshape(-1),
+                         (c - 1)[None, :].expand(pn, pn - 1).reshape(-1),
+                         r[:, None].expand(pn, pn - 1).reshape(-1),
+                         c[None, :].expand(pn, pn - 1).reshape(-1),
+                         1.0)
+
+            r = torch.arange(1, pn, device=idx_map.device)
+            c = torch.arange(pn, device=idx_map.device)
+            add_neighbor((r - 1)[:, None].expand(pn - 1, pn).reshape(-1),
+                         c[None, :].expand(pn - 1, pn).reshape(-1),
+                         r[:, None].expand(pn - 1, pn).reshape(-1),
+                         c[None, :].expand(pn - 1, pn).reshape(-1),
+                         1.0)
+
+        # second-order neighbors encode short periodicity
+        if pn > 2:
+            r = torch.arange(pn, device=idx_map.device)
+            c = torch.arange(2, pn, device=idx_map.device)
+            add_neighbor(r[:, None].expand(pn, pn - 2).reshape(-1),
+                         (c - 2)[None, :].expand(pn, pn - 2).reshape(-1),
+                         r[:, None].expand(pn, pn - 2).reshape(-1),
+                         c[None, :].expand(pn, pn - 2).reshape(-1),
+                         0.5)
+
+            r = torch.arange(2, pn, device=idx_map.device)
+            c = torch.arange(pn, device=idx_map.device)
+            add_neighbor((r - 2)[:, None].expand(pn - 2, pn).reshape(-1),
+                         c[None, :].expand(pn - 2, pn).reshape(-1),
+                         r[:, None].expand(pn - 2, pn).reshape(-1),
+                         c[None, :].expand(pn - 2, pn).reshape(-1),
+                         0.5)
+
+        return ctx / cnt.clamp_min(1e-6)
+
+    @staticmethod
+    def _apply_local_prior_rerank(
+        filtered_logits_BlV: torch.Tensor,
+        base_idx_Bl: torch.Tensor,
+        emb_weight: torch.Tensor,
+        pn: int,
+        rerank_top_r: int,
+        rerank_weight: float,
+    ) -> torch.Tensor:
+        """Rerank top-r token candidates using simple local embedding compatibility."""
+        if pn < 2 or rerank_top_r <= 1 or rerank_weight <= 0:
+            return base_idx_Bl
+
+        B, l, V = filtered_logits_BlV.shape
+        top_r = min(rerank_top_r, V)
+        cand_logits, cand_idx = filtered_logits_BlV.topk(top_r, dim=-1)
+
+        idx_map = base_idx_Bl.view(B, pn, pn)
+        local_ctx = VAR._build_local_prior_context(idx_map, emb_weight).view(B, l, -1)
+        ctx_norm = F.normalize(local_ctx.float(), dim=-1)
+
+        cand_emb = emb_weight[cand_idx].float()  # [B, l, r, Cvae]
+        cand_norm = F.normalize(cand_emb, dim=-1)
+        local_scores = (cand_norm * ctx_norm.unsqueeze(2)).sum(dim=-1)
+
+        no_ctx_mask = (local_ctx.abs().sum(dim=-1, keepdim=True) < 1e-8)
+        local_scores = torch.where(no_ctx_mask, torch.zeros_like(local_scores), local_scores)
+
+        rerank_scores = cand_logits.float() + rerank_weight * local_scores
+        best_pos = rerank_scores.argmax(dim=-1, keepdim=True)
+        reranked_idx = cand_idx.gather(-1, best_pos).squeeze(-1)
+        return reranked_idx
     
     @torch.no_grad()
     def autoregressive_infer_cfg(
         self, B: int, label_B: Optional[Union[int, torch.LongTensor]],
         g_seed: Optional[int] = None, cfg=1.5, top_k=0, top_p=0.0,
         more_smooth=False,
+        enable_local_rerank: bool = False,
+        local_rerank_weight: float = 0.0,
+        local_rerank_top_r: int = 8,
     ) -> torch.Tensor:   # returns reconstructed image (B, 3, H, W) in [0, 1]
         """
         only used for inference, on autoregressive mode
@@ -278,7 +371,17 @@ class VAR(nn.Module):
             t = cfg * ratio
             logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
             
-            idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
+            filtered_logits_BlV = logits_BlV.clone()
+            idx_Bl = sample_with_top_k_top_p_(filtered_logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
+            if enable_local_rerank:
+                idx_Bl = self._apply_local_prior_rerank(
+                    filtered_logits_BlV=filtered_logits_BlV,
+                    base_idx_Bl=idx_Bl,
+                    emb_weight=self.vae_quant_proxy[0].embedding.weight,
+                    pn=pn,
+                    rerank_top_r=local_rerank_top_r,
+                    rerank_weight=local_rerank_weight,
+                )
             if not more_smooth: # this is the default case
                 h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
             else:   # not used when evaluating FID/IS/Precision/Recall

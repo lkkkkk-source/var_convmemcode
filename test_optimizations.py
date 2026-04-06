@@ -294,6 +294,65 @@ def test_batched_cat_memory():
 
 
 # =====================================================================
+# Test 7: Local rerank helper
+# =====================================================================
+def test_local_rerank_helper():
+    print("\n=== Test 7: Local Rerank Helper ===")
+    from models.var import VAR
+
+    torch.manual_seed(42)
+
+    # vocab embeddings: token 1 is close to token 0, token 2 is far
+    emb_weight = torch.tensor([
+        [1.0, 0.0],
+        [0.9, 0.1],
+        [-1.0, 0.0],
+    ], dtype=torch.float32)
+
+    base_idx = torch.tensor([[0, 0, 0, 0]], dtype=torch.long)
+    logits = torch.tensor([[[0.0, 0.0, 0.0],
+                            [0.0, 0.0, 0.0],
+                            [0.0, 0.1, 0.0],
+                            [0.0, 0.1, 0.0]]], dtype=torch.float32)
+
+    reranked = VAR._apply_local_prior_rerank(
+        filtered_logits_BlV=logits,
+        base_idx_Bl=base_idx,
+        emb_weight=emb_weight,
+        pn=2,
+        rerank_top_r=3,
+        rerank_weight=2.0,
+    )
+
+    check("Local rerank preserves shape", reranked.shape == base_idx.shape)
+    check("Local rerank prefers neighborhood-compatible token",
+          reranked[0, 2].item() != 2 and reranked[0, 3].item() != 2)
+
+
+# =====================================================================
+# Test 8: Local rerank noop conditions
+# =====================================================================
+def test_local_rerank_noop():
+    print("\n=== Test 8: Local Rerank No-op ===")
+    from models.var import VAR
+
+    emb_weight = torch.randn(8, 4)
+    base_idx = torch.tensor([[1]], dtype=torch.long)
+    logits = torch.randn(1, 1, 8)
+
+    reranked = VAR._apply_local_prior_rerank(
+        filtered_logits_BlV=logits,
+        base_idx_Bl=base_idx,
+        emb_weight=emb_weight,
+        pn=1,
+        rerank_top_r=1,
+        rerank_weight=0.0,
+    )
+
+    check("No-op rerank returns original ids", torch.equal(reranked, base_idx))
+
+
+# =====================================================================
 # Run all tests
 # =====================================================================
 if __name__ == '__main__':
@@ -307,6 +366,8 @@ if __name__ == '__main__':
     test_knitting_memory()
     test_texture_plan()
     test_checkpoint_compat()
+    test_local_rerank_helper()
+    test_local_rerank_noop()
 
     print("\n" + "=" * 60)
     print(f"  Results: {PASS} passed, {FAIL} failed")
