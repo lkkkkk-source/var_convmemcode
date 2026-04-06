@@ -23,6 +23,10 @@ class VARTrainer(object):
         self, device, patch_nums: Tuple[int, ...], resos: Tuple[int, ...],
         vae_local: VQVAE, var_wo_ddp: VAR, var: DDP,
         var_opt: AmpOptimizer, label_smooth: float,
+        local_prior_model: Optional[nn.Module] = None,
+        local_prior_weight: float = 0.0,
+        local_prior_patch_size: int = 64,
+        local_prior_num_patches: int = 4,
     ):
         super(VARTrainer, self).__init__()
         
@@ -66,6 +70,11 @@ class VARTrainer(object):
         self.current_slot_sep_weight = 0.001
         self.current_seam_weight = 0.0  # warmed up externally
         self.current_aux_cls_weight = 0.10
+        self.current_local_prior_weight = float(local_prior_weight)
+
+        self.local_prior_model = local_prior_model
+        self.local_prior_patch_size = int(local_prior_patch_size)
+        self.local_prior_num_patches = int(local_prior_num_patches)
 
         self.monitor_every = 500
         self._texture_dead_gate_thresh = 0.02
@@ -73,6 +82,51 @@ class VARTrainer(object):
         self._memory_dead_gate_thresh = 0.02
         self._memory_flatline_loss_eps = 1e-8
         self._memory_dead_slot_ratio_thresh = 0.95
+
+    def _sample_patch_batch(self, imgs_B3HW: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = imgs_B3HW.shape
+        patch_size = self.local_prior_patch_size
+        patches = []
+        for bi in range(B):
+            img = imgs_B3HW[bi]
+            for _ in range(self.local_prior_num_patches):
+                if H <= patch_size or W <= patch_size:
+                    patch = F.interpolate(img.unsqueeze(0), size=(patch_size, patch_size), mode='bilinear', align_corners=False).squeeze(0)
+                else:
+                    top = int(torch.randint(0, H - patch_size + 1, (1,), device=imgs_B3HW.device).item())
+                    left = int(torch.randint(0, W - patch_size + 1, (1,), device=imgs_B3HW.device).item())
+                    patch = img[:, top:top + patch_size, left:left + patch_size]
+                patches.append(patch)
+        return torch.stack(patches, dim=0)
+
+    def _build_soft_reconstruction(self, gt_idx_Bl: List[ITen], logits_BLV: torch.Tensor) -> torch.Tensor:
+        emb_weight = self.quantize_local.embedding.weight
+        ms_h_BChw = []
+        for idx_Bl in gt_idx_Bl[:-1]:
+            B = idx_Bl.shape[0]
+            l = idx_Bl.shape[1]
+            pn = round(l ** 0.5)
+            ms_h_BChw.append(emb_weight[idx_Bl].transpose(1, 2).reshape(B, self.quantize_local.Cvae, pn, pn))
+
+        probs = logits_BLV[:, -self.last_l:, :].softmax(dim=-1)
+        fine_emb = probs @ emb_weight  # [B, l, Cvae]
+        fine_pn = self.patch_nums[-1]
+        fine_h = fine_emb.transpose(1, 2).reshape(logits_BLV.shape[0], self.quantize_local.Cvae, fine_pn, fine_pn)
+        ms_h_BChw.append(fine_h)
+
+        img = self.vae_local.embed_to_img(ms_h_BChw=ms_h_BChw, all_to_max_scale=True, last_one=True)
+        return img.add(1).mul(0.5).clamp(0, 1)
+
+    def _compute_local_prior_loss(self, gt_idx_Bl: List[ITen], logits_BLV: torch.Tensor) -> Optional[torch.Tensor]:
+        if self.local_prior_model is None or self.current_local_prior_weight <= 0:
+            return None
+        if self.local_prior_num_patches <= 0:
+            return None
+
+        fake_img = self._build_soft_reconstruction(gt_idx_Bl, logits_BLV)
+        fake_patches = self._sample_patch_batch(fake_img)
+        scores = self.local_prior_model(fake_patches)
+        return -scores.mean()
 
     @staticmethod
     def _to_float(v) -> float:
@@ -344,6 +398,11 @@ class VARTrainer(object):
             # ========== Auxiliary classification loss (returned from forward) ==========
             if aux_cls_loss is not None and self.current_aux_cls_weight > 0:
                 loss = loss + self.current_aux_cls_weight * aux_cls_loss
+
+            # ========== Frozen learned local prior loss ==========
+            local_prior_loss = self._compute_local_prior_loss(gt_idx_Bl, logits_BLV)
+            if local_prior_loss is not None:
+                loss = loss + self.current_local_prior_weight * local_prior_loss
         
         # backward
         grad_norm, scale_log2 = self.var_opt.backward_clip_step(loss=loss, stepping=stepping)
@@ -440,6 +499,9 @@ class VARTrainer(object):
                                         value=entropy_weighted, step=g_it)
                             tb_lg.update(head=f'Memory/max_attn_layer{block_idx}',
                                         value=max_attn_weighted, step=g_it)
+
+                if local_prior_loss is not None:
+                    tb_lg.update(head='LocalPrior/loss', value=self._to_float(local_prior_loss), step=g_it)
 
                 self._log_texture_and_memory_monitoring(tb_lg=tb_lg, var_model=var_model, g_it=g_it)
 

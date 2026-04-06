@@ -108,6 +108,12 @@ class Args(Tap):
     slot_sep_weight: float = 0.001 # slot separation loss weight
     aux_tap_layer: int = 9         # which layer to tap for aux classification (must be unfrozen)
 
+    # Learned local prior (optional frozen patch realism scorer)
+    local_prior_ckpt: str = ''     # path to frozen learned local prior checkpoint
+    local_prior_weight: float = 0.0  # auxiliary realism loss weight
+    local_prior_patch_size: int = 64 # patch size fed into local prior
+    local_prior_num_patches: int = 4 # random patches sampled per image during training
+
     # Fine-tuning from pretrained
     pretrained_ckpt: str = './var_d16.pth'      # path to pretrained VAR checkpoint (e.g., ImageNet pretrained)
     freeze_layers: str = '0_7'     # layers to freeze, e.g., '0_7' freezes layers 0-7 (first half, keep new modules trainable)
