@@ -297,21 +297,17 @@ class VAR(nn.Module):
     
     def compute_seam_loss(self, x_final: torch.Tensor, begin_ends: List[Tuple[int, int]]) -> torch.Tensor:
         """
-        Token-space seam loss: normalized cosine distance between opposite edge tokens.
-        Only computed for scales with pn >= 4, later scales weighted higher.
-
-        Args:
-            x_final: [B, L, C] final hidden states
-            begin_ends: list of (start, end) for each scale
-
-        Returns:
-            scalar seam loss
+        Token-space continuity loss on local neighbors.
+        Encourages internal left/right and up/down continuity (plus weaker second-order continuity)
+        instead of only matching opposite outer borders.
         """
         B, L, C = x_final.shape
         L_seam = 0.0
         num_terms = 0
 
         for si, (start, end) in enumerate(begin_ends):
+            if end > L:
+                break
             pn = int(math.sqrt(end - start))
             if pn < 4:
                 continue
@@ -320,13 +316,20 @@ class VAR(nn.Module):
             h = F.normalize(x_final[:, start:end, :].float(), dim=-1)
             h = h.view(B, pn, pn, C)
 
-            # Left-right seam: column 0 vs column (pn-1)
-            seam_lr = 1.0 - F.cosine_similarity(h[:, :, 0, :], h[:, :, -1, :], dim=-1)  # [B, pn]
-            # Top-bottom seam: row 0 vs row (pn-1)
-            seam_ud = 1.0 - F.cosine_similarity(h[:, 0, :, :], h[:, -1, :, :], dim=-1)  # [B, pn]
+            # First-order local continuity: adjacent stitches should transition smoothly.
+            seam_lr = 1.0 - F.cosine_similarity(h[:, :, :-1, :], h[:, :, 1:, :], dim=-1)
+            seam_ud = 1.0 - F.cosine_similarity(h[:, :-1, :, :], h[:, 1:, :, :], dim=-1)
+
+            local_loss = seam_lr.mean() + seam_ud.mean()
+
+            # Weaker second-order continuity for short-period stitch flow.
+            if pn >= 6:
+                seam_lr_2 = 1.0 - F.cosine_similarity(h[:, :, :-2, :], h[:, :, 2:, :], dim=-1)
+                seam_ud_2 = 1.0 - F.cosine_similarity(h[:, :-2, :, :], h[:, 2:, :, :], dim=-1)
+                local_loss = local_loss + 0.5 * (seam_lr_2.mean() + seam_ud_2.mean())
 
             w = self.seam_scale_weights[si] if si < len(self.seam_scale_weights) else 1.0
-            L_seam = L_seam + w * (seam_lr.mean() + seam_ud.mean())
+            L_seam = L_seam + w * local_loss
             num_terms += 1
 
         if num_terms == 0:
@@ -413,6 +416,15 @@ class VAR(nn.Module):
                         aux_cls_logits[valid_mask],
                         original_labels[valid_mask]
                     )
+
+        if isinstance(x_BLC, tuple):
+            h_final, resi_final = x_BLC
+            x_final_for_seam = resi_final + self.blocks[-1].drop_path(h_final)
+        else:
+            x_final_for_seam = x_BLC
+
+        active_begin_ends = [(s, e) for s, e in self.begin_ends if e <= x_final_for_seam.shape[1]]
+        self.last_seam_loss = self.compute_seam_loss(x_final_for_seam, active_begin_ends)
 
         x_BLC = self.get_logits(x_BLC.float() if not isinstance(x_BLC, tuple) else x_BLC, cond_BD)
 
