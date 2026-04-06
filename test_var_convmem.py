@@ -56,6 +56,12 @@ parser.add_argument('--batch_size', type=int, default=50,
                     help='Batch size for generation')
 parser.add_argument('--demo_only', action='store_true',
                     help='Only generate demo images without calculating FID')
+parser.add_argument('--enable_local_rerank', action='store_true',
+                    help='Enable knit-aware local prior reranking during sampling')
+parser.add_argument('--local_rerank_weight', type=float, default=0.0,
+                    help='Weight for local prior reranking score')
+parser.add_argument('--local_rerank_top_r', type=int, default=8,
+                    help='Top-r candidates used for local prior reranking')
 
 # VAR_convMem 特定参数 - 纹理增强
 parser.add_argument('--enable_texture', action='store_true',
@@ -125,6 +131,9 @@ print(f"  --num_samples: {args.num_samples}")
 print(f"  --batch_size: {args.batch_size}")
 print(f"  --top_k: {args.top_k}")
 print(f"  --top_p: {args.top_p}")
+print(f"  --enable_local_rerank: {args.enable_local_rerank}")
+print(f"  --local_rerank_weight: {args.local_rerank_weight}")
+print(f"  --local_rerank_top_r: {args.local_rerank_top_r}")
 
 # 路径参数
 print("\n📂 路径参数:")
@@ -535,7 +544,10 @@ try:
             recon_B3HW = var.autoregressive_infer_cfg(
                 B=B, label_B=label_B,
                 cfg=cfg, top_k=args.top_k, top_p=args.top_p,
-                g_seed=seed, more_smooth=more_smooth
+                g_seed=seed, more_smooth=more_smooth,
+                enable_local_rerank=args.enable_local_rerank,
+                local_rerank_weight=args.local_rerank_weight,
+                local_rerank_top_r=args.local_rerank_top_r,
             )
 
     print("✅ 图像生成完成")
@@ -639,7 +651,10 @@ for batch_idx in range(num_batches):
                 generated_batch = var.autoregressive_infer_cfg(
                     B=current_batch_size, label_B=label_batch,
                     cfg=cfg, top_k=args.top_k, top_p=args.top_p,
-                    g_seed=current_seed, more_smooth=more_smooth
+                    g_seed=current_seed, more_smooth=more_smooth,
+                    enable_local_rerank=args.enable_local_rerank,
+                    local_rerank_weight=args.local_rerank_weight,
+                    local_rerank_top_r=args.local_rerank_top_r,
                 )
 
         # 每个批次后种子递增，确保不同且连续
