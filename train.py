@@ -220,7 +220,6 @@ def build_everything(args: arg_util.Args):
     # build models
     from torch.nn.parallel import DistributedDataParallel as DDP
     from models import VAR, VQVAE, build_vae_var
-    from models.patch_realism_scorer import PatchRealismScorer
     from trainer import VARTrainer
     from utils.amp_sc import AmpOptimizer
     from utils.lr_control import filter_params
@@ -470,28 +469,10 @@ def build_everything(args: arg_util.Args):
     del names, paras, para_groups
     
     # build trainer
-    local_prior_model = None
-    if args.local_prior_ckpt:
-        if not os.path.exists(args.local_prior_ckpt):
-            print(f'[INIT][LocalPrior][WARN] --local_prior_ckpt not found: {args.local_prior_ckpt}; disable local prior loss.')
-        else:
-            ckpt = torch.load(args.local_prior_ckpt, map_location='cpu')
-            local_prior_model = PatchRealismScorer().to(dist.get_device())
-            state = ckpt.get('model', ckpt)
-            local_prior_model.load_state_dict(state, strict=True)
-            local_prior_model.eval()
-            for p in local_prior_model.parameters():
-                p.requires_grad_(False)
-            print(f'[INIT][LocalPrior] Loaded frozen local prior from {args.local_prior_ckpt}')
-
     trainer = VARTrainer(
         device=args.device, patch_nums=args.patch_nums, resos=args.resos,
         vae_local=vae_local, var_wo_ddp=var_wo_ddp, var=var,
         var_opt=var_optim, label_smooth=args.ls,
-        local_prior_model=local_prior_model,
-        local_prior_weight=args.local_prior_weight,
-        local_prior_patch_size=args.local_prior_patch_size,
-        local_prior_num_patches=args.local_prior_num_patches,
     )
     if trainer_state is not None and len(trainer_state):
         trainer.load_state_dict(trainer_state, strict=False, skip_vae=True) # don't load vae again
