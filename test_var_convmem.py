@@ -311,6 +311,51 @@ def pil_loader_rgb(path):
     return img
 
 
+def build_label_to_class_name(data_path, num_classes):
+    split_datasets = {}
+    split_roots = {
+        'train': os.path.join(data_path, 'train'),
+        'val': os.path.join(data_path, 'val'),
+        'test': os.path.join(data_path, 'test'),
+    }
+
+    for split_name in ['train', 'val', 'test']:
+        split_root = split_roots[split_name]
+        if not os.path.isdir(split_root):
+            continue
+        split_datasets[split_name] = DatasetFolder(
+            root=split_root,
+            loader=pil_loader_rgb,
+            extensions=IMG_EXTENSIONS,
+        )
+
+    class_name_to_label = {}
+    if 'train' in split_datasets:
+        class_name_to_label.update(split_datasets['train'].class_to_idx)
+    else:
+        class_names = set()
+        for dataset in split_datasets.values():
+            class_names.update(dataset.classes)
+        for idx, class_name in enumerate(sorted(class_names)):
+            class_name_to_label[class_name] = idx
+
+    label_to_class_name = {}
+    for class_name, label in class_name_to_label.items():
+        if 0 <= label < num_classes:
+            label_to_class_name[label] = class_name
+
+    for label in range(num_classes):
+        label_to_class_name.setdefault(label, f'class_{label:03d}')
+
+    return label_to_class_name
+
+
+def sanitize_class_name(class_name):
+    sanitized = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in str(class_name).strip())
+    sanitized = '_'.join(part for part in sanitized.split('_') if part)
+    return sanitized or 'unknown'
+
+
 def collect_real_images_by_class(data_path):
     split_datasets = {}
     class_name_to_label = {}
@@ -552,6 +597,8 @@ if args.enable_memory:
 
 print("✅ 模型准备完成")
 local_prior_model = build_local_prior_model(device=device)
+label_to_class_name = build_label_to_class_name(args.data_path, args.num_classes)
+print(f"✅ 类别命名映射: {label_to_class_name}")
 
 ################## 2. 生成演示图像
 
@@ -634,6 +681,20 @@ try:
     chw.save(output_path)
     print(f"💾 演示结果已保存到: {output_path}")
 
+    demo_individual_dir = os.path.join(args.output_dir, f"demo_images{feature_suffix}_d{MODEL_DEPTH}_cfg{cfg}_seed{seed}")
+    if os.path.exists(demo_individual_dir):
+        shutil.rmtree(demo_individual_dir)
+    os.makedirs(demo_individual_dir, exist_ok=True)
+
+    for i, class_id in enumerate(demo_classes):
+        class_name = label_to_class_name.get(class_id, f'class_{class_id:03d}')
+        class_name_safe = sanitize_class_name(class_name)
+        demo_img = recon_B3HW[i].permute(1, 2, 0).mul(255).cpu().numpy().astype(np.uint8)
+        demo_img = PImage.fromarray(demo_img)
+        demo_path = os.path.join(demo_individual_dir, f"class{class_id:03d}_{class_name_safe}_demo.png")
+        demo_img.save(demo_path)
+    print(f"💾 各类别演示图已保存到: {demo_individual_dir}")
+
 except Exception as e:
     print(f"❌ 生成过程出错: {e}")
     import traceback
@@ -699,6 +760,7 @@ generation_labels = generation_labels[:num_samples_for_fid]
 # 打乱顺序以避免批次偏差
 random.shuffle(generation_labels)
 generated_images_by_class = defaultdict(list)
+generated_counts_by_class = defaultdict(int)
 
 num_batches = (num_samples_for_fid + batch_size - 1) // batch_size
 sample_count = 0
@@ -751,9 +813,17 @@ for batch_idx in range(num_batches):
             img_pil = PImage.fromarray(img_np)
 
             # 保存图像
-            img_path = os.path.join(generated_dir, f"generated_{sample_count:05d}.png")
+            class_id = int(batch_labels[i])
+            class_name = label_to_class_name.get(class_id, f'class_{class_id:03d}')
+            class_name_safe = sanitize_class_name(class_name)
+            class_local_count = generated_counts_by_class[class_id]
+            img_path = os.path.join(
+                generated_dir,
+                f"class{class_id:03d}_{class_name_safe}_{class_local_count:05d}_g{sample_count:05d}.png"
+            )
             img_pil.save(img_path)
-            generated_images_by_class[batch_labels[i]].append(img_path)
+            generated_images_by_class[class_id].append(img_path)
+            generated_counts_by_class[class_id] += 1
             sample_count += 1
 
         if (batch_idx + 1) % 10 == 0:
