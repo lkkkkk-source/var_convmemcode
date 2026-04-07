@@ -51,6 +51,7 @@
 | v2.7 seam-continuity | 4.5 | ✓ | ✓ | activate seam path + switch to local continuity loss | 47.1005 | pending | confirmed regression | continuity smoothing hurt realism/FID |
 | local prior rerank (heuristic) | 4.5 | ✓ | ✓ | sampling-time local token reranking | **40.7663** | **0.007513** | promising prototype | best metrics so far, but visible heuristic artifacts remain |
 | <span style="color:#d14; font-weight:700;">learned local prior</span> | 4.5 | ✓ | ✓ | trained patch-level realism prior + sampling-time rerank | <span style="color:#d14; font-weight:700;">41.3366</span> | <span style="color:#d14; font-weight:700;">0.007898</span> | <span style="color:#d14; font-weight:700;">new best final-model result</span> | visually more natural than heuristic prior; LPIPS/SSIM did not improve |
+| v2.8 train-time local prior loss | 4.5 | ✓ | ✓ | frozen learned local prior integrated into training as auxiliary loss | 46.6388 | 0.010858 | confirmed regression | sampling-time local prior works, but naive train-time integration fails |
 
 ---
 
@@ -250,6 +251,13 @@ Per-class comparison takeaways:
 - Interpretation: the learned prior still improves FID/KID substantially over `v2.2`, while producing visually more natural results than the heuristic prior; however, LPIPS/SSIM do not improve at the same time
 - Decision: treat this as the current strongest enhanced model result; keep `v2.2` as the stable baseline and use the learned prior version as the main upgraded variant in the paper
 
+### v2.8 train-time local prior loss — failed training integration
+
+- Change: freeze the learned local prior and integrate it into training as an auxiliary local realism loss
+- Result: **FID 46.6388, KID 0.010858, LPIPS 0.7875 ± 0.1518, SSIM 0.0641 ± 0.0493**
+- Interpretation: this confirms a train/eval mismatch; the sampling-time learned prior helps when used as a reranker, but a naive frozen-scorer training loss degrades generation quality
+- Decision: stop this train-time integration formulation; keep learned local prior as a sampling-time enhancement only
+
 ---
 
 ## Current Best Recipes
@@ -311,11 +319,12 @@ Core settings:
 
 ### Most promising next-stage direction
 
-- train-time integration of the learned local prior / patch-level realism prior
+- improve the local prior itself rather than directly forcing it into training
 - Motivation: current `v2.2` still shows two visual weaknesses:
   - local pasted / stitched artifacts in some results
   - stitch-level texture realism that is still softer than real knitted fabric
 - The heuristic local prior prototype strongly improved FID/KID, and the learned local prior further showed that a trained patch-level realism prior can improve the mainline without the same level of heuristic artifact.
+- However, direct train-time integration of the frozen scorer failed, so the safer conclusion is to keep local prior as a sampling-time enhancement in the current paper stage.
 
 ---
 
