@@ -57,6 +57,8 @@ parser.add_argument('--batch_size', type=int, default=50,
                     help='Batch size for generation')
 parser.add_argument('--demo_only', action='store_true',
                     help='Only generate demo images without calculating FID')
+parser.add_argument('--skip_per_class_fid', action='store_true',
+                    help='Skip per-class FID computation while keeping overall FID/KID evaluation')
 parser.add_argument('--enable_learned_local_prior', action='store_true',
                     help='Enable learned patch realism prior reranking during generation')
 parser.add_argument('--local_prior_ckpt', type=str, default='',
@@ -138,6 +140,7 @@ print(f"  --num_samples: {args.num_samples}")
 print(f"  --batch_size: {args.batch_size}")
 print(f"  --top_k: {args.top_k}")
 print(f"  --top_p: {args.top_p}")
+print(f"  --skip_per_class_fid: {args.skip_per_class_fid}")
 print(f"  --enable_learned_local_prior: {args.enable_learned_local_prior}")
 if args.enable_learned_local_prior:
     print(f"  --local_prior_ckpt: {args.local_prior_ckpt}")
@@ -904,7 +907,11 @@ else:
 
             print(f"   已复制 {copied_count} 张真实图像到临时目录")
 
-            real_images_by_class = collect_real_images_by_class(args.data_path)
+            real_images_by_class = None
+            if args.skip_per_class_fid:
+                print("⏭️ 已跳过每类别 FID 计算")
+            else:
+                real_images_by_class = collect_real_images_by_class(args.data_path)
 
             # 使用 clean-fid 计算 FID
             print(f"\n🧮 使用 clean-fid 计算 FID...")
@@ -920,13 +927,16 @@ else:
             shutil.rmtree(temp_real_dir)
 
             # 计算每类别FID
-            print(f"\n🧮 计算每类别 FID...")
-            compute_per_class_fid(
-                args=args,
-                generated_images_by_class=generated_images_by_class,
-                real_images_by_class=real_images_by_class,
-                output_dir=args.output_dir,
-            )
+            if args.skip_per_class_fid:
+                print(f"\n⏭️ 跳过每类别 FID 计算")
+            else:
+                print(f"\n🧮 计算每类别 FID...")
+                compute_per_class_fid(
+                    args=args,
+                    generated_images_by_class=generated_images_by_class,
+                    real_images_by_class=real_images_by_class,
+                    output_dir=args.output_dir,
+                )
 
             # 计算额外的评估指标
             print(f"\n📊 计算额外评估指标...")
