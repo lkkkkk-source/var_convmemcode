@@ -91,8 +91,24 @@ def extract_embeddings(
     with torch.no_grad():
         for batch, batch_paths in loader:
             batch = batch.to(device, non_blocking=True)
+            # emb = loss_fn.net.forward(batch)
+            # emb = F.normalize(emb.flatten(1), dim=1)
             emb = loss_fn.net.forward(batch)
-            emb = F.normalize(emb.flatten(1), dim=1)
+            if isinstance(emb, (list, tuple)):
+                parts = [item.flatten(1) for item in emb if torch.is_tensor(item)]
+                if not parts:
+                    raise RuntimeError(f"Unsupported LPIPS feature output type: {type(emb)}")
+                emb = torch.cat(parts, dim=1)
+            elif torch.is_tensor(emb):
+                emb = emb.flatten(1)
+            elif hasattr(emb, "__dict__"):
+                parts = [value.flatten(1) for value in emb.__dict__.values() if torch.is_tensor(value)]
+                if not parts:
+                    raise RuntimeError(f"Unsupported LPIPS structured output type: {type(emb)}")
+                emb = torch.cat(parts, dim=1)
+            else:
+                raise RuntimeError(f"Unsupported LPIPS feature output type: {type(emb)}")
+            emb = F.normalize(emb, dim=1)
             feats.append(emb.cpu())
             ordered_paths.extend(batch_paths)
 
