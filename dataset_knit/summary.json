@@ -1,0 +1,114 @@
+{
+  "dataset_name": "dataset_knit",
+  "seed": 42,
+  "policy": {
+    "train_sources": [
+      "rendering_only"
+    ],
+    "eval_source": "rendering_only",
+    "group_key_rule": "strip trailing _front/_back only",
+    "split_ratio": [
+      0.8,
+      0.1,
+      0.09999999999999995
+    ],
+    "leakage_prevention": "rendering grouped split keeps related variants in one split"
+  },
+  "input_counts": {
+    "rendering": 12390
+  },
+  "split_counts": {
+    "train": {
+      "images": 9912,
+      "by_class": {
+        "Cable1": 1050,
+        "Cable2": 663,
+        "Hem": 2149,
+        "Links1": 209,
+        "Links2": 785,
+        "Mesh": 183,
+        "Miss": 1135,
+        "Move1": 1212,
+        "Move2": 2284,
+        "Tuck": 242
+      },
+      "by_source": {
+        "rendering": 9912
+      }
+    },
+    "val": {
+      "images": 1240,
+      "by_class": {
+        "Cable1": 131,
+        "Cable2": 83,
+        "Hem": 269,
+        "Links1": 26,
+        "Links2": 98,
+        "Mesh": 23,
+        "Miss": 142,
+        "Move1": 152,
+        "Move2": 286,
+        "Tuck": 30
+      },
+      "by_source": {
+        "rendering": 1240
+      }
+    },
+    "test": {
+      "images": 1238,
+      "by_class": {
+        "Cable1": 131,
+        "Cable2": 83,
+        "Hem": 268,
+        "Links1": 26,
+        "Links2": 98,
+        "Mesh": 23,
+        "Miss": 142,
+        "Move1": 151,
+        "Move2": 285,
+        "Tuck": 31
+      },
+      "by_source": {
+        "rendering": 1238
+      }
+    }
+  },
+  "rendering_group_split_counts": {
+    "train": {
+      "Cable1": 1050,
+      "Cable2": 663,
+      "Hem": 2149,
+      "Links1": 209,
+      "Links2": 785,
+      "Mesh": 183,
+      "Miss": 1135,
+      "Move1": 1212,
+      "Move2": 2284,
+      "Tuck": 242
+    },
+    "val": {
+      "Cable1": 131,
+      "Cable2": 83,
+      "Hem": 269,
+      "Links1": 26,
+      "Links2": 98,
+      "Mesh": 23,
+      "Miss": 142,
+      "Move1": 152,
+      "Move2": 286,
+      "Tuck": 30
+    },
+    "test": {
+      "Cable1": 131,
+      "Cable2": 83,
+      "Hem": 268,
+      "Links1": 26,
+      "Links2": 98,
+      "Mesh": 23,
+      "Miss": 142,
+      "Move1": 151,
+      "Move2": 285,
+      "Tuck": 31
+    }
+  }
+}
