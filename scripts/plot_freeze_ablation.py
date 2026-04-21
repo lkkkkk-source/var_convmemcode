@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT_PATH = ROOT / "TMM" / "img" / "parameter_analysis" / "08_freeze_strategy.png"
+OUT_DIR = ROOT / "TMM" / "img" / "parameter_analysis"
 
 
 def main():
@@ -28,27 +28,31 @@ def main():
         }
     )
 
-    labels = ["freeze 0--7", "freeze 0--9", "freeze 0--10", "freeze 0--11"]
+    labels = ["freeze 0-7", "freeze 0-9", "freeze 0-10", "freeze 0-11"]
     x = list(range(len(labels)))
     fid = [48.1733, 45.9512, 46.9420, 44.8140]
+    kid = [0.012261, 0.009708, 0.008023, 0.009480]
 
-    fig, ax = plt.subplots(1, 1, figsize=(5.4, 3.8))
-    best_idx = min(range(len(fid)), key=lambda i: fid[i])
+    def _plot_metric(vals, ylabel, color, out_name):
+        fig, ax = plt.subplots(1, 1, figsize=(5.4, 3.8))
+        best_idx = min(range(len(vals)), key=lambda i: vals[i])
+        ax.plot(x, vals, marker="o", linewidth=2.4, markersize=5.8, color=color)
+        ax.scatter([x[best_idx]], [vals[best_idx]], s=80, color="#d4af37", edgecolors="black", linewidths=0.8, zorder=3)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.set_xlabel("Frozen backbone layers")
+        ax.set_ylabel(ylabel)
+        ax.set_title("Freeze-strategy sensitivity", pad=8, fontweight="semibold")
+        ax.grid(True, axis="y")
+        fig.tight_layout(pad=0.8)
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = OUT_DIR / out_name
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved freeze ablation plot to: {out_path}")
 
-    ax.plot(x, fid, marker="o", linewidth=2.4, markersize=5.8, color="#1f4e79")
-    ax.scatter([x[best_idx]], [fid[best_idx]], s=80, color="#d4af37", edgecolors="black", linewidths=0.8, zorder=3)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.set_xlabel("Frozen backbone layers")
-    ax.set_ylabel("FID ↓")
-    ax.set_title("Freeze-strategy sensitivity", pad=8, fontweight="semibold")
-    ax.grid(True, axis="y")
-
-    fig.tight_layout(pad=0.8)
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(OUT_PATH, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved freeze ablation plot to: {OUT_PATH}")
+    _plot_metric(fid, "FID ↓", "#1f4e79", "08_freeze_strategy.png")
+    _plot_metric(kid, "KID ↓", "#b22222", "08_freeze_strategy_kid.png")
 
 
 if __name__ == "__main__":

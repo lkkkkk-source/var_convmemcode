@@ -37,50 +37,139 @@ def _metric_text(val):
     return f"{val:.4f}" if val < 1 else f"{val:.2f}"
 
 
-def plot_two_metrics(x, fid, kid, labels, title, xlabel, filename, rotate=0, annotate=True):
-    fig, axes = plt.subplots(1, 2, figsize=(10.8, 4.0))
-    colors = ("#1f4e79", "#b22222")
-    metrics = [(fid, "FID ↓", colors[0]), (kid, "KID ↓", colors[1])]
-
-    for ax, (vals, ylabel, color) in zip(axes, metrics):
-        best_idx = min(range(len(vals)), key=lambda i: vals[i])
-        ax.plot(x, vals, marker="o", linewidth=2.3, markersize=5.5, color=color, zorder=2)
-        ax.scatter([x[best_idx]], [vals[best_idx]], s=80, color="#d4af37", edgecolors="black", linewidths=0.8, zorder=3)
-        ax.set_title(ylabel, pad=8)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        if labels is not None:
-            ax.set_xticks(x)
-            ax.set_xticklabels(labels, rotation=rotate, ha="right" if rotate else "center")
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
-        if annotate:
-            pass
-
-    fig.suptitle(title, fontsize=13, y=1.01, fontweight="semibold")
-    fig.tight_layout(pad=1.0, w_pad=1.2)
+def _plot_single_metric(x, vals, labels, title, xlabel, ylabel, color, filename, rotate=0, annotate=True):
+    fig, ax = plt.subplots(1, 1, figsize=(5.4, 4.0))
+    best_idx = min(range(len(vals)), key=lambda i: vals[i])
+    ax.plot(x, vals, marker="o", linewidth=2.3, markersize=5.5, color=color, zorder=2)
+    ax.scatter([x[best_idx]], [vals[best_idx]], s=80, color="#d4af37", edgecolors="black", linewidths=0.8, zorder=3)
+    ax.set_title(title, pad=8)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if labels is not None:
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=rotate, ha="right" if rotate else "center")
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+    if annotate:
+        pass
+    fig.tight_layout(pad=1.0)
     fig.savefig(OUT_DIR / filename, bbox_inches="tight")
     plt.close(fig)
 
 
+def plot_two_metrics(x, fid, kid, labels, title, xlabel, filename, rotate=0, annotate=True):
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix or ".png"
+    _plot_single_metric(
+        x,
+        fid,
+        labels,
+        f"{title} (FID)",
+        xlabel,
+        "FID ↓",
+        "#1f4e79",
+        f"{stem}_fid{suffix}",
+        rotate=rotate,
+        annotate=annotate,
+    )
+    _plot_single_metric(
+        x,
+        kid,
+        labels,
+        f"{title} (KID)",
+        xlabel,
+        "KID ↓",
+        "#b22222",
+        f"{stem}_kid{suffix}",
+        rotate=rotate,
+        annotate=annotate,
+    )
+
+
 def plot_seed_stability(seeds, fid, kid, filename):
-    fig, axes = plt.subplots(1, 2, figsize=(10.8, 4.0))
-    for ax, vals, ylabel, color in [
-        (axes[0], fid, "FID ↓", "#1f4e79"),
-        (axes[1], kid, "KID ↓", "#b22222"),
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix or ".png"
+    for vals, ylabel, color, out_name in [
+        (fid, "FID ↓", "#1f4e79", f"{stem}_fid{suffix}"),
+        (kid, "KID ↓", "#b22222", f"{stem}_kid{suffix}"),
     ]:
         mean_val = sum(vals) / len(vals)
         best_idx = min(range(len(vals)), key=lambda i: vals[i])
+        fig, ax = plt.subplots(1, 1, figsize=(5.4, 4.0))
         ax.plot(seeds, vals, marker="o", linewidth=2.3, markersize=5.5, color=color, zorder=2)
         ax.scatter([seeds[best_idx]], [vals[best_idx]], s=80, color="#d4af37", edgecolors="black", linewidths=0.8, zorder=3)
         ax.axhline(mean_val, linestyle="--", color="gray", linewidth=1.1, label=f"mean={mean_val:.4f}")
         ax.fill_between(seeds, [min(vals)] * len(seeds), [max(vals)] * len(seeds), color=color, alpha=0.08)
         ax.set_xlabel("Random seed")
         ax.set_ylabel(ylabel)
-        ax.set_title(f"Multi-seed {ylabel}", pad=8)
+        ax.set_title(f"Multi-seed stability ({ylabel})", pad=8)
         ax.set_xticks(seeds)
         ax.legend(loc="best")
-    fig.suptitle("Multi-seed stability of the full training-time model", fontsize=13, y=1.01, fontweight="semibold")
-    fig.tight_layout(pad=1.0, w_pad=1.2)
+        fig.tight_layout(pad=1.0)
+        fig.savefig(OUT_DIR / out_name, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_cfg_tradeoff(cfg_scales, fid, kid, lpips_proxy, selected_cfg, filename):
+    fig, axes = plt.subplots(1, 2, figsize=(10.2, 4.1))
+    cmap = plt.get_cmap("viridis")
+    scale_min = min(cfg_scales)
+    scale_range = max(cfg_scales) - scale_min or 1.0
+    colors = [cmap((cfg - scale_min) / scale_range) for cfg in cfg_scales]
+
+    panels = [
+        (axes[0], fid, "FID ↓", "Quality–perceptual trade-off (FID)"),
+        (axes[1], kid, "KID ↓", "Quality–perceptual trade-off (KID)"),
+    ]
+
+    for ax, quality_vals, ylabel, title in panels:
+        ax.plot(lpips_proxy, quality_vals, color="#9aa0a6", linewidth=1.2, alpha=0.7, zorder=1)
+
+        for cfg, x, y, color in zip(cfg_scales, lpips_proxy, quality_vals, colors):
+            is_selected = abs(cfg - selected_cfg) < 1e-8
+            ax.scatter(
+                [x],
+                [y],
+                s=120 if is_selected else 64,
+                color=color,
+                edgecolors="black",
+                linewidths=1.1 if is_selected else 0.6,
+                marker="*" if is_selected else "o",
+                zorder=3,
+            )
+            ax.annotate(
+                f"{cfg:g}",
+                (x, y),
+                textcoords="offset points",
+                xytext=(0, 8 if is_selected else 6),
+                ha="center",
+                fontsize=8.5,
+            )
+
+        ax.set_title(title, pad=8)
+        ax.set_xlabel("LPIPS proxy ↑")
+        ax.set_ylabel(ylabel)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+        ax.grid(True, alpha=0.18)
+        ax.text(
+            0.03,
+            0.04,
+            "← lower LPIPS proxy is better\n↓ lower quality metric is better",
+            transform=ax.transAxes,
+            fontsize=8.2,
+            color="#4d4d4d",
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#d0d0d0", alpha=0.9),
+        )
+
+    fig.suptitle("CFG trade-off with perceptual-distance proxy", y=1.02, fontsize=12, fontweight="semibold")
+    fig.text(
+        0.5,
+        -0.01,
+        "LPIPS proxy here is computed against real-image samples from the evaluation summary, and can be replaced by pairwise LPIPS later.",
+        ha="center",
+        fontsize=8.2,
+        color="#555555",
+    )
+    fig.tight_layout(pad=1.0)
     fig.savefig(OUT_DIR / filename, bbox_inches="tight")
     plt.close(fig)
 
@@ -109,6 +198,7 @@ def main():
     cfg_labels = [2.0, 2.5, 3.5, 4.0, 4.5, 5.0, 5.5]
     cfg_fid = [47.43, 46.81, 45.52, 45.31, 44.81, 44.43, 44.26]
     cfg_kid = [0.01196, 0.01146, 0.01034, 0.00995, 0.00948, 0.00900, 0.00852]
+    cfg_lpips_proxy = [0.7865, 0.7861, 0.7874, 0.7877, 0.7888, 0.7900, 0.7871]
     plot_two_metrics(
         cfg_labels,
         cfg_fid,
@@ -118,6 +208,14 @@ def main():
         "CFG scale",
         "02_cfg_sweep.png",
         annotate=False,
+    )
+    plot_cfg_tradeoff(
+        cfg_labels,
+        cfg_fid,
+        cfg_kid,
+        cfg_lpips_proxy,
+        selected_cfg=4.5,
+        filename="02_cfg_tradeoff.png",
     )
 
     # 3) Class-aware rank sweep
