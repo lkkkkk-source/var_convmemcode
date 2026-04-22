@@ -227,7 +227,7 @@ def main():
         rank_fid,
         rank_kid,
         None,
-        "Class-aware rank sensitivity",
+        "Category-aware rank sensitivity",
         "Residual rank",
         "03_rank_sweep.png",
         annotate=False,
