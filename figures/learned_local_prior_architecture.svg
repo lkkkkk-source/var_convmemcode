@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#334155"/>
+    </marker>
+    <marker id="arrowSoft" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    </marker>
+    <style>
+      .bg { fill: #f8fafc; }
+      .panel { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; rx: 14; }
+      .panelTitle { font: 700 24px Arial, Helvetica, sans-serif; fill: #0f172a; }
+      .title { font: 700 30px Arial, Helvetica, sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 16px Arial, Helvetica, sans-serif; fill: #475569; }
+      .box { fill: #eef2ff; stroke: #6366f1; stroke-width: 1.5; rx: 10; }
+      .box2 { fill: #ecfeff; stroke: #0891b2; stroke-width: 1.5; rx: 10; }
+      .box3 { fill: #f0fdf4; stroke: #16a34a; stroke-width: 1.5; rx: 10; }
+      .box4 { fill: #fff7ed; stroke: #ea580c; stroke-width: 1.5; rx: 10; }
+      .core { fill: #fef2f2; stroke: #dc2626; stroke-width: 2; rx: 12; }
+      .small { font: 400 14px Arial, Helvetica, sans-serif; fill: #334155; }
+      .label { font: 700 16px Arial, Helvetica, sans-serif; fill: #0f172a; }
+      .note { font: 400 13px Arial, Helvetica, sans-serif; fill: #475569; }
+      .formula { font: 700 17px Consolas, Monaco, monospace; fill: #0f172a; }
+      .arrow { stroke: #334155; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .dashed { stroke: #64748b; stroke-width: 2; fill: none; stroke-dasharray: 7 6; marker-end: url(#arrowSoft); }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1280" height="820"/>
+  <text class="title" x="640" y="46" text-anchor="middle">Learned Local Prior for VAR_convMem Sampling</text>
+  <text class="subtitle" x="640" y="74" text-anchor="middle">A patch-level realism prior is learned from real/fake local crops and used to rerank generation candidates.</text>
+
+  <rect class="panel" x="40" y="110" width="560" height="520"/>
+  <text class="panelTitle" x="70" y="148">A. Train Patch-Level Local Prior</text>
+  <text class="subtitle" x="70" y="174">Offline training: binary local realism supervision</text>
+
+  <rect class="box3" x="75" y="210" width="170" height="70"/>
+  <text class="label" x="160" y="238" text-anchor="middle">Real images</text>
+  <text class="note" x="160" y="262" text-anchor="middle">knitting dataset</text>
+
+  <rect class="box4" x="75" y="320" width="170" height="70"/>
+  <text class="label" x="160" y="348" text-anchor="middle">Fake images</text>
+  <text class="note" x="160" y="372" text-anchor="middle">VAR outputs</text>
+
+  <rect class="box2" x="300" y="265" width="180" height="80"/>
+  <text class="label" x="390" y="294" text-anchor="middle">Random crop</text>
+  <text class="note" x="390" y="318" text-anchor="middle">local patch P x P</text>
+
+  <path class="arrow" d="M245 245 C270 245, 270 288, 300 295"/>
+  <path class="arrow" d="M245 355 C270 355, 270 322, 300 315"/>
+
+  <rect class="core" x="130" y="445" width="390" height="120"/>
+  <text class="label" x="325" y="475" text-anchor="middle">PatchRealismScorer f_theta</text>
+  <text class="note" x="325" y="502" text-anchor="middle">Conv3x3 + BN + LeakyReLU x 4</text>
+  <text class="note" x="325" y="526" text-anchor="middle">Global average pooling + MLP</text>
+  <text class="note" x="325" y="550" text-anchor="middle">Output: local realism logit</text>
+
+  <path class="arrow" d="M390 345 L390 425 C390 435, 380 445, 365 445"/>
+
+  <rect class="box" x="75" y="585" width="190" height="38"/>
+  <text class="small" x="170" y="609" text-anchor="middle">BCE real/fake loss</text>
+
+  <rect class="box3" x="330" y="585" width="210" height="38"/>
+  <text class="small" x="435" y="609" text-anchor="middle">patch-local-prior-best.pth</text>
+
+  <path class="arrow" d="M255 565 C235 576, 215 582, 185 585"/>
+  <path class="arrow" d="M325 565 C355 575, 390 580, 425 585"/>
+
+  <rect class="panel" x="680" y="110" width="560" height="520"/>
+  <text class="panelTitle" x="710" y="148">B. Sampling-Time Candidate Reranking</text>
+  <text class="subtitle" x="710" y="174">Inference: generate M candidates and keep the most locally realistic image</text>
+
+  <rect class="box" x="715" y="210" width="155" height="65"/>
+  <text class="label" x="792.5" y="238" text-anchor="middle">Class label y</text>
+  <text class="note" x="792.5" y="260" text-anchor="middle">conditioning</text>
+
+  <rect class="core" x="925" y="200" width="210" height="85"/>
+  <text class="label" x="1030" y="232" text-anchor="middle">VAR_convMem</text>
+  <text class="note" x="1030" y="256" text-anchor="middle">v2.2 generator</text>
+
+  <path class="arrow" d="M870 242 L925 242"/>
+
+  <rect class="box2" x="715" y="340" width="145" height="55"/>
+  <text class="small" x="787.5" y="363" text-anchor="middle">candidate I1</text>
+  <text class="note" x="787.5" y="382" text-anchor="middle">seed t</text>
+
+  <rect class="box2" x="715" y="415" width="145" height="55"/>
+  <text class="small" x="787.5" y="438" text-anchor="middle">candidate I2</text>
+  <text class="note" x="787.5" y="457" text-anchor="middle">seed t+1</text>
+
+  <rect class="box2" x="715" y="490" width="145" height="55"/>
+  <text class="small" x="787.5" y="513" text-anchor="middle">candidate IM</text>
+  <text class="note" x="787.5" y="532" text-anchor="middle">seed t+M-1</text>
+
+  <path class="arrow" d="M1030 285 C1030 325, 880 335, 860 360"/>
+  <path class="arrow" d="M1030 285 C1030 380, 885 410, 860 435"/>
+  <path class="arrow" d="M1030 285 C1030 455, 885 485, 860 510"/>
+
+  <rect class="box4" x="915" y="370" width="170" height="90"/>
+  <text class="label" x="1000" y="398" text-anchor="middle">Sample K patches</text>
+  <text class="note" x="1000" y="423" text-anchor="middle">per candidate image</text>
+  <text class="note" x="1000" y="445" text-anchor="middle">default K = 8</text>
+
+  <path class="arrow" d="M860 367 C885 367, 895 383, 915 400"/>
+  <path class="arrow" d="M860 442 C885 442, 895 430, 915 425"/>
+  <path class="arrow" d="M860 517 C890 505, 900 462, 930 455"/>
+
+  <rect class="core" x="985" y="505" width="210" height="70"/>
+  <text class="label" x="1090" y="532" text-anchor="middle">Frozen f_theta</text>
+  <text class="note" x="1090" y="555" text-anchor="middle">patch realism scores</text>
+
+  <path class="arrow" d="M1020 460 C1035 480, 1060 490, 1080 505"/>
+
+  <rect class="box3" x="920" y="600" width="165" height="45"/>
+  <text class="small" x="1002.5" y="628" text-anchor="middle">average score s(Ij)</text>
+
+  <rect class="box3" x="1115" y="600" width="90" height="45"/>
+  <text class="small" x="1160" y="628" text-anchor="middle">argmax</text>
+
+  <path class="arrow" d="M1090 575 C1080 590, 1055 598, 1030 600"/>
+  <path class="arrow" d="M1085 622 L1115 622"/>
+
+  <rect class="box3" x="1050" y="690" width="165" height="55"/>
+  <text class="label" x="1132.5" y="713" text-anchor="middle">Selected image</text>
+  <text class="note" x="1132.5" y="735" text-anchor="middle">final output</text>
+  <path class="arrow" d="M1160 645 L1160 690"/>
+
+  <path class="dashed" d="M540 604 C670 675, 900 650, 1045 575"/>
+  <text class="note" x="705" y="675">load learned prior weights</text>
+
+  <rect class="panel" x="160" y="665" width="720" height="105"/>
+  <text class="formula" x="190" y="705">s(I_j) = (1 / K) * sum_k f_theta(P_k(I_j))</text>
+  <text class="formula" x="190" y="737">I* = argmax_j s(I_j)</text>
+  <text class="note" x="190" y="760">The prior does not update VAR weights at inference; it selects the candidate with the strongest learned local texture realism.</text>
+</svg>

@@ -82,6 +82,11 @@ def test_class_aware_memory():
     mk2, mv2, _, _ = mem(x2, begin_ends, cat_invalid)
     check("All invalid cats produces output", mk2.abs().sum() > 0)
 
+    cat_oob = torch.tensor([22, -1, 999, -5])
+    mk_oob, mv_oob, _, _ = mem(x2, begin_ends, cat_oob)
+    check("Out-of-range cats are treated as invalid",
+          mk_oob.shape == (B, L, C) and mv_oob.shape == (B, L, C))
+
     # Test with all same category
     cat_same = torch.tensor([5, 5, 5, 5])
     mk3, mv3, _, _ = mem(x2, begin_ends, cat_same)
@@ -147,6 +152,37 @@ def test_knitting_memory():
 
 
 # =====================================================================
+# Test 2b: VAR init preserves class-aware alpha gate init
+# =====================================================================
+def test_var_init_preserves_alpha_gate():
+    print("\n=== Test 2b: VAR Alpha Gate Init ===")
+    from models.var import VAR
+
+    class DummyVAE(nn.Module):
+        Cvae = 4
+        vocab_size = 16
+        quantize = object()
+
+    var = VAR(
+        vae_local=DummyVAE(),
+        num_classes=3, depth=2, embed_dim=128, num_heads=2,
+        patch_nums=(1, 2),
+        flash_if_available=False, fused_if_available=False,
+        enable_memory=True, memory_enable_layers=[1],
+        memory_num_patterns=2, memory_size=2,
+        use_class_aware_memory=True, num_categories=3, cat_rank=2,
+    )
+    var.init_weights()
+
+    mem = var.blocks[1].attn.knitting_memory
+    final = mem.alpha_mlp[-1]
+    check("Alpha gate final weight reset to zero",
+          torch.allclose(final.weight, torch.zeros_like(final.weight)))
+    check("Alpha gate final bias favors shared",
+          torch.allclose(final.bias, torch.full_like(final.bias, -1.0)))
+
+
+# =====================================================================
 # Test 3: Texture execution plan equivalence
 # =====================================================================
 def test_texture_plan():
@@ -196,6 +232,43 @@ def test_texture_plan():
     tf = attn._compute_texture_modulation(x_g, begin_ends)
     tf.sum().backward()
     check("Texture gradient flows", x_g.grad is not None and x_g.grad.abs().sum() > 0)
+
+
+# =====================================================================
+# Test 3b: Texture plan cache for autoregressive local layouts
+# =====================================================================
+def test_texture_plan_ar_cache():
+    print("\n=== Test 3b: Texture Plan AR Cache ===")
+    from models.basic_var import SelfAttention
+
+    torch.manual_seed(42)
+
+    C, H, depth = 256, 4, 16
+    patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+
+    attn = SelfAttention(
+        block_idx=8, embed_dim=C, num_heads=H, depth=depth,
+        enable_texture=True, texture_scales=[3, 5, 7, 11],
+        texture_per_head_kernels=False,
+    )
+    attn.eval()
+
+    # AR inference first visits scale 0 only. This layout has no valid texture
+    # ops, but it must not poison later local layouts.
+    be_scale0 = [(0, 1)] + [(0, 0)] * (len(patch_nums) - 1)
+    x0 = torch.randn(2, 1, C)
+    y0 = attn._compute_texture_modulation(x0, be_scale0)
+    check("Scale-0 AR texture is skipped", y0.abs().sum() == 0)
+
+    # A later AR step has a different begin_ends layout and should build a
+    # separate active plan.
+    be_last = [(0, 0)] * (len(patch_nums) - 1) + [(0, patch_nums[-1] ** 2)]
+    x_last = torch.randn(2, patch_nums[-1] ** 2, C)
+    y_last = attn._compute_texture_modulation(x_last, be_last)
+
+    active = sum(p is not None for p in attn._texture_plan)
+    check("Later AR layout builds active texture plan", active > 0)
+    check("Later AR texture is nonzero", y_last.abs().sum() > 0)
 
 
 # =====================================================================
@@ -305,7 +378,9 @@ if __name__ == '__main__':
     test_batched_cat_memory()
     test_class_aware_memory()
     test_knitting_memory()
+    test_var_init_preserves_alpha_gate()
     test_texture_plan()
+    test_texture_plan_ar_cache()
     test_checkpoint_compat()
 
     print("\n" + "=" * 60)

@@ -448,6 +448,13 @@ class VAR(nn.Module):
                 if conv_std_or_gain > 0: nn.init.trunc_normal_(m.weight.data, std=conv_std_or_gain)
                 else: nn.init.xavier_normal_(m.weight.data, gain=-conv_std_or_gain)
                 if with_bias: m.bias.data.zero_()
+
+        # Some extension modules intentionally override sub-layer defaults.
+        # Reapply them after the VAR-wide Linear/Embedding initialization pass.
+        for m in self.modules():
+            reset_alpha_gate_init = getattr(m, 'reset_alpha_gate_init', None)
+            if callable(reset_alpha_gate_init):
+                reset_alpha_gate_init()
         
         if init_head >= 0:
             if isinstance(self.head, nn.Linear):

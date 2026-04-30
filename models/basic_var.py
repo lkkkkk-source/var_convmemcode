@@ -222,7 +222,11 @@ class SelfAttention(nn.Module):
                     depth=depth,
                 )
 
-        # Pre-computed texture execution plan (lazily built on first forward)
+        # Pre-computed texture execution plans (lazily built per begin_ends layout).
+        # Training uses one full-token layout, while AR inference uses a different
+        # local layout at each scale; caching only one plan would let the initial
+        # 1x1 inference stage disable texture for all later stages.
+        self._texture_plan_cache = {} if enable_texture else None
         self._texture_plan = None if enable_texture else []
         self._last_texture_gate_stats = {}
 
@@ -266,17 +270,17 @@ class SelfAttention(nn.Module):
 
     def _build_texture_plan(self, begin_ends):
         """Build static execution plan on first forward. Maps each scale to pre-validated ops."""
-        self._texture_plan = []
+        texture_plan = []
         for start_idx, end_idx in begin_ends:
             scale_len = end_idx - start_idx
             pn = int(math.sqrt(scale_len))
             if pn * pn != scale_len or pn < 2:
-                self._texture_plan.append(None)
+                texture_plan.append(None)
                 continue
 
             active_kernels = _get_active_kernels(pn, self.texture_scales)
             if not active_kernels:
-                self._texture_plan.append(None)
+                texture_plan.append(None)
                 continue
 
             row_plan, col_plan, diag_plan = [], [], []
@@ -292,9 +296,12 @@ class SelfAttention(nn.Module):
                     diag_plan.append((self.diag_ops[op_key], idx))
 
             if not (row_plan or col_plan or diag_plan):
-                self._texture_plan.append(None)
+                texture_plan.append(None)
                 continue
-            self._texture_plan.append((pn, start_idx, end_idx, row_plan, col_plan, diag_plan))
+            texture_plan.append((pn, start_idx, end_idx, row_plan, col_plan, diag_plan))
+
+        self._texture_plan = texture_plan
+        return texture_plan
 
     def _compute_texture_modulation(
         self,
@@ -313,11 +320,19 @@ class SelfAttention(nn.Module):
 
         tex_output = torch.zeros(B, H, L, c, device=x_BLC.device, dtype=x_BLC.dtype)
 
-        # Build execution plan on first call (lazy init)
-        if self._texture_plan is None:
-            self._build_texture_plan(begin_ends)
+        # Build/reuse execution plan for this exact layout. Full teacher-forcing
+        # training and step-wise AR inference have different begin_ends layouts.
+        plan_key = tuple((int(s), int(e)) for s, e in begin_ends)
+        if self._texture_plan_cache is None:
+            texture_plan = self._texture_plan
+        elif plan_key in self._texture_plan_cache:
+            texture_plan = self._texture_plan_cache[plan_key]
+            self._texture_plan = texture_plan
+        else:
+            texture_plan = self._build_texture_plan(begin_ends)
+            self._texture_plan_cache[plan_key] = texture_plan
 
-        for plan_entry in self._texture_plan:
+        for plan_entry in texture_plan:
             if plan_entry is None:
                 continue
             pn, start_idx, end_idx, row_plan, col_plan, diag_plan = plan_entry

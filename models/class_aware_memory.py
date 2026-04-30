@@ -92,9 +92,8 @@ class ClassAwareKnittingMemoryV2(nn.Module):
             nn.GELU(),
             nn.Linear(128, 1),
         )
-        # Init to slightly favor shared (output ~0 -> alpha ~0.5, but we bias towards shared)
-        nn.init.zeros_(self.alpha_mlp[-1].weight)
-        nn.init.constant_(self.alpha_mlp[-1].bias, -1.0)  # sigmoid(-1) ≈ 0.27
+        # Init to slightly favor shared memory.
+        self.reset_alpha_gate_init()
 
         # ==================== 7. K/V 输出投影 + 门控 (低秩) ====================
         mem_rank = 64
@@ -181,6 +180,11 @@ class ClassAwareKnittingMemoryV2(nn.Module):
 
     def freeze_learnable_temperature(self):
         self.log_temperature.requires_grad_(False)
+
+    def reset_alpha_gate_init(self):
+        """Restore alpha gate init after VAR-wide Linear initialization."""
+        nn.init.zeros_(self.alpha_mlp[-1].weight)
+        nn.init.constant_(self.alpha_mlp[-1].bias, -1.0)  # sigmoid(-1) ~= 0.27
 
     def _get_cat_memory(self, cat_id: int, scale_idx: int) -> torch.Tensor:
         """
@@ -291,13 +295,16 @@ class ClassAwareKnittingMemoryV2(nn.Module):
         shared_keys_all = self.key_proj(shared_mem_stacked)    # [num_scales, slots, C]
         shared_values_all = self.value_proj(shared_mem_stacked)  # [num_scales, slots, C]
 
-        # 3. 确定是否使用类别记忆
-        use_category = category_ids is not None
-        has_valid_category = use_category and (category_ids >= 0).any()
-
         # Handle None case by creating a default tensor
         if category_ids is None:
             category_ids = torch.full((B,), -1, device=x.device, dtype=torch.long)
+        else:
+            category_ids = category_ids.to(device=x.device, dtype=torch.long)
+
+        # 3. 确定是否使用类别记忆
+        # IDs outside [0, num_categories) are unconditional/shared-only.
+        valid_category_mask = (category_ids >= 0) & (category_ids < self.num_categories)
+        has_valid_category = valid_category_mask.any()
 
         # 4. 逐尺度检索
         mem_combined = torch.zeros_like(x)  # [B, L, C]
@@ -326,8 +333,8 @@ class ClassAwareKnittingMemoryV2(nn.Module):
 
             # 7. 类别分支检索 (批量向量化，消除逐样本循环)
             if has_valid_category:
-                valid_mask = (category_ids >= 0)  # [B]
-                safe_cat_ids = category_ids.clamp(min=0)  # [B], invalid→0 as dummy
+                valid_mask = valid_category_mask  # [B]
+                safe_cat_ids = category_ids.masked_fill(~valid_mask, 0)  # [B], invalid as dummy
 
                 # 找唯一类别，批量计算低秩记忆
                 unique_cats, inverse_idx = torch.unique(safe_cat_ids, return_inverse=True)

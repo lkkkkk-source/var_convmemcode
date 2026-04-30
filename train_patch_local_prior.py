@@ -28,9 +28,17 @@ def list_images(root: str) -> List[str]:
 
 
 class PatchBinaryDataset(Dataset):
-    def __init__(self, real_paths: List[str], fake_paths: List[str], patch_size: int = 64, image_size: int = 256):
+    def __init__(
+        self,
+        real_paths: List[str],
+        fake_paths: List[str],
+        patch_size: int = 64,
+        image_size: int = 256,
+        random_crop: bool = True,
+    ):
         self.samples: List[Tuple[str, int]] = [(p, 1) for p in real_paths] + [(p, 0) for p in fake_paths]
         self.patch_size = patch_size
+        self.random_crop = random_crop
         self.pre = transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
@@ -48,10 +56,72 @@ class PatchBinaryDataset(Dataset):
             x = F.interpolate(x.unsqueeze(0), size=(max(h, self.patch_size), max(w, self.patch_size)), mode='bilinear', align_corners=False).squeeze(0)
             _, h, w = x.shape
 
-        top = random.randint(0, h - self.patch_size)
-        left = random.randint(0, w - self.patch_size)
+        if self.random_crop:
+            top = random.randint(0, h - self.patch_size)
+            left = random.randint(0, w - self.patch_size)
+        else:
+            top = (h - self.patch_size) // 2
+            left = (w - self.patch_size) // 2
         patch = x[:, top:top + self.patch_size, left:left + self.patch_size]
         return patch, torch.tensor(label, dtype=torch.float32)
+
+
+def split_train_val(paths: List[str], val_ratio: float, seed: int) -> Tuple[List[str], List[str]]:
+    paths = list(paths)
+    rng = random.Random(seed)
+    rng.shuffle(paths)
+    if val_ratio <= 0:
+        return paths, []
+    n_val = int(round(len(paths) * val_ratio))
+    n_val = max(1, min(n_val, len(paths) - 1))
+    return paths[n_val:], paths[:n_val]
+
+
+def binary_auc_from_logits(logits: torch.Tensor, targets: torch.Tensor) -> float:
+    scores = logits.detach().float().cpu()
+    labels = targets.detach().float().cpu()
+    pos = labels > 0.5
+    neg = ~pos
+    n_pos = int(pos.sum().item())
+    n_neg = int(neg.sum().item())
+    if n_pos == 0 or n_neg == 0:
+        return 0.5
+
+    order = torch.argsort(scores)
+    ranks = torch.empty_like(scores)
+    ranks[order] = torch.arange(1, scores.numel() + 1, dtype=scores.dtype)
+    pos_rank_sum = ranks[pos].sum().item()
+    auc = (pos_rank_sum - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+    return float(auc)
+
+
+@torch.no_grad()
+def evaluate(model: nn.Module, loader: DataLoader, criterion: nn.Module, device: str) -> Tuple[float, float, float]:
+    model.eval()
+    total_loss = 0.0
+    total = 0
+    correct = 0
+    all_logits = []
+    all_targets = []
+
+    for x, y in loader:
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+
+        logits = model(x)
+        loss = criterion(logits, y)
+
+        total_loss += loss.item() * x.size(0)
+        total += x.size(0)
+        pred = (torch.sigmoid(logits) > 0.5).float()
+        correct += (pred == y).sum().item()
+        all_logits.append(logits.detach())
+        all_targets.append(y.detach())
+
+    avg_loss = total_loss / max(total, 1)
+    acc = correct / max(total, 1)
+    auc = binary_auc_from_logits(torch.cat(all_logits), torch.cat(all_targets)) if all_logits else 0.5
+    return avg_loss, acc, auc
 
 
 def main():
@@ -66,6 +136,8 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--val_ratio', type=float, default=0.1)
+    parser.add_argument('--best_metric', type=str, default='val_auc', choices=['val_auc', 'val_loss'])
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -83,14 +155,24 @@ def main():
     print(f'[LocalPrior] real patches source: {len(real_paths)} images')
     print(f'[LocalPrior] fake patches source: {len(fake_paths)} images')
 
-    dataset = PatchBinaryDataset(real_paths, fake_paths, patch_size=args.patch_size, image_size=args.image_size)
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True, drop_last=False)
+    real_train, real_val = split_train_val(real_paths, args.val_ratio, args.seed)
+    fake_train, fake_val = split_train_val(fake_paths, args.val_ratio, args.seed + 1)
+    print(f'[LocalPrior] train split: real={len(real_train)}, fake={len(fake_train)}')
+    print(f'[LocalPrior] val split: real={len(real_val)}, fake={len(fake_val)}')
+
+    train_dataset = PatchBinaryDataset(real_train, fake_train, patch_size=args.patch_size, image_size=args.image_size, random_crop=True)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True, drop_last=False)
+
+    val_loader = None
+    if len(real_val) > 0 and len(fake_val) > 0:
+        val_dataset = PatchBinaryDataset(real_val, fake_val, patch_size=args.patch_size, image_size=args.image_size, random_crop=False)
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, drop_last=False)
 
     model = PatchRealismScorer().to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     criterion = nn.BCEWithLogitsLoss()
 
-    best_loss = float('inf')
+    best_score = -float('inf')
     best_path = osp.join(args.out_dir, 'patch-local-prior-best.pth')
     last_path = osp.join(args.out_dir, 'patch-local-prior-last.pth')
 
@@ -99,7 +181,7 @@ def main():
         total_loss = 0.0
         total = 0
         correct = 0
-        for x, y in loader:
+        for x, y in train_loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
@@ -117,12 +199,34 @@ def main():
 
         avg_loss = total_loss / max(total, 1)
         acc = correct / max(total, 1)
-        print(f'[LocalPrior][ep {ep+1}/{args.epochs}] loss={avg_loss:.4f}, acc={acc:.4f}')
 
-        torch.save({'epoch': ep + 1, 'model': model.state_dict(), 'args': vars(args)}, last_path)
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            torch.save({'epoch': ep + 1, 'model': model.state_dict(), 'args': vars(args)}, best_path)
+        if val_loader is not None:
+            val_loss, val_acc, val_auc = evaluate(model, val_loader, criterion, device)
+            monitor_score = val_auc if args.best_metric == 'val_auc' else -val_loss
+            print(
+                f'[LocalPrior][ep {ep+1}/{args.epochs}] '
+                f'train_loss={avg_loss:.4f}, train_acc={acc:.4f}, '
+                f'val_loss={val_loss:.4f}, val_acc={val_acc:.4f}, val_auc={val_auc:.4f}'
+            )
+        else:
+            val_loss, val_acc, val_auc = None, None, None
+            monitor_score = -avg_loss
+            print(f'[LocalPrior][ep {ep+1}/{args.epochs}] train_loss={avg_loss:.4f}, train_acc={acc:.4f}')
+
+        ckpt = {
+            'epoch': ep + 1,
+            'model': model.state_dict(),
+            'args': vars(args),
+            'train_loss': avg_loss,
+            'train_acc': acc,
+            'val_loss': val_loss,
+            'val_acc': val_acc,
+            'val_auc': val_auc,
+        }
+        torch.save(ckpt, last_path)
+        if monitor_score > best_score:
+            best_score = monitor_score
+            torch.save(ckpt, best_path)
 
     print(f'[LocalPrior] best saved to: {best_path}')
     print(f'[LocalPrior] last saved to: {last_path}')
