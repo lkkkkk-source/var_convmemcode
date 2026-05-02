@@ -43,14 +43,16 @@ parser.add_argument('--cfg', type=float, default=1.5,
                     help='Classifier-free guidance scale (1.5 for FID evaluation, 5.0 for quality)')
 parser.add_argument('--seed', type=int, default=0,
                     help='Random seed')
-parser.add_argument('--num_samples', type=int, default=4400,
-                    help='Number of samples to generate for FID calculation (default 4400 for knitting dataset)')
+parser.add_argument('--num_samples', type=int, default=672,
+                    help='Number of samples to generate for FID calculation (default 672 for val+test reference set)')
 parser.add_argument('--output_dir', type=str, default='./evaluation_results',
                     help='Output directory for results')
 parser.add_argument('--top_k', type=int, default=900,
                     help='Top-k for sampling')
 parser.add_argument('--top_p', type=float, default=0.96,
                     help='Top-p for sampling')
+parser.add_argument('--fid_splits', type=str, default='val_test',
+                    help='Reference splits for FID/KID/per-class FID: val_test, test, val, train, or train_val_test')
 parser.add_argument('--num_classes', type=int, default=22,
                     help='Number of classes (22 for knitting dataset, 1000 for ImageNet)')
 parser.add_argument('--batch_size', type=int, default=50,
@@ -100,6 +102,31 @@ parser.add_argument('--memory_cat_rank', type=int, default=4,
 
 args = parser.parse_args()
 
+
+def parse_fid_splits(spec):
+    alias_to_splits = {
+        'train_val_test': ['train', 'val', 'test'],
+        'all': ['train', 'val', 'test'],
+        'val_test': ['val', 'test'],
+        'test': ['test'],
+        'val': ['val'],
+        'train': ['train'],
+    }
+    key = str(spec).strip().lower()
+    if key in alias_to_splits:
+        return alias_to_splits[key]
+
+    split_names = [part.strip().lower() for part in key.replace('+', '_').split('_') if part.strip()]
+    valid = [name for name in split_names if name in {'train', 'val', 'test'}]
+    deduped = []
+    for name in valid:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped or ['val', 'test']
+
+
+FID_SPLITS = parse_fid_splits(args.fid_splits)
+
 # 创建输出目录
 os.makedirs(args.output_dir, exist_ok=True)
 
@@ -140,6 +167,7 @@ print(f"  --num_samples: {args.num_samples}")
 print(f"  --batch_size: {args.batch_size}")
 print(f"  --top_k: {args.top_k}")
 print(f"  --top_p: {args.top_p}")
+print(f"  --fid_splits: {args.fid_splits} -> {FID_SPLITS}")
 print(f"  --skip_per_class_fid: {args.skip_per_class_fid}")
 print(f"  --enable_learned_local_prior: {args.enable_learned_local_prior}")
 if args.enable_learned_local_prior:
@@ -314,7 +342,9 @@ def pil_loader_rgb(path):
     return img
 
 
-def build_label_to_class_name(data_path, num_classes):
+def build_label_to_class_name(data_path, num_classes, split_names=None):
+    if split_names is None:
+        split_names = ['train', 'val', 'test']
     split_datasets = {}
     split_roots = {
         'train': os.path.join(data_path, 'train'),
@@ -322,7 +352,7 @@ def build_label_to_class_name(data_path, num_classes):
         'test': os.path.join(data_path, 'test'),
     }
 
-    for split_name in ['train', 'val', 'test']:
+    for split_name in split_names:
         split_root = split_roots[split_name]
         if not os.path.isdir(split_root):
             continue
@@ -359,7 +389,9 @@ def sanitize_class_name(class_name):
     return sanitized or 'unknown'
 
 
-def collect_real_images_by_class(data_path):
+def collect_real_images_by_class(data_path, split_names=None):
+    if split_names is None:
+        split_names = ['train', 'val', 'test']
     split_datasets = {}
     class_name_to_label = {}
     split_roots = {
@@ -368,7 +400,7 @@ def collect_real_images_by_class(data_path):
         'test': os.path.join(data_path, 'test'),
     }
 
-    for split_name in ['train', 'val', 'test']:
+    for split_name in split_names:
         split_root = split_roots[split_name]
         if not os.path.isdir(split_root):
             continue
@@ -390,7 +422,7 @@ def collect_real_images_by_class(data_path):
     real_images_by_class = defaultdict(list)
     skipped_unknown = 0
 
-    for split_name in ['train', 'val', 'test']:
+    for split_name in split_names:
         dataset = split_datasets.get(split_name)
         if dataset is None:
             continue
@@ -600,7 +632,7 @@ if args.enable_memory:
 
 print("✅ 模型准备完成")
 local_prior_model = build_local_prior_model(device=device)
-label_to_class_name = build_label_to_class_name(args.data_path, args.num_classes)
+label_to_class_name = build_label_to_class_name(args.data_path, args.num_classes, split_names=FID_SPLITS)
 print(f"✅ 类别命名映射: {label_to_class_name}")
 
 ################## 2. 生成演示图像
@@ -728,7 +760,7 @@ if os.path.exists(real_dir):
     shutil.rmtree(real_dir)
 os.makedirs(real_dir, exist_ok=True)
 _real_count = 0
-for _split in ['train', 'val', 'test']:
+for _split in FID_SPLITS:
     _split_dir = pathlib.Path(args.data_path) / _split
     if not _split_dir.exists():
         continue
@@ -911,7 +943,7 @@ else:
             if args.skip_per_class_fid:
                 print("⏭️ 已跳过每类别 FID 计算")
             else:
-                real_images_by_class = collect_real_images_by_class(args.data_path)
+                real_images_by_class = collect_real_images_by_class(args.data_path, split_names=FID_SPLITS)
 
             # 使用 clean-fid 计算 FID
             print(f"\n🧮 使用 clean-fid 计算 FID...")
