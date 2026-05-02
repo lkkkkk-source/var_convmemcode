@@ -20,13 +20,14 @@ TOP_P=0.96
 SEED=0
 
 PRIOR_IMAGE_SIZE=256
-PRIOR_BATCH_SIZE=64
+PRIOR_BATCH_SIZE=256
 PRIOR_LR=1e-4
-PRIOR_WORKERS=0
+PRIOR_WORKERS=4
 PRIOR_VAL_RATIO=0.1
 PRIOR_MAX_EPOCHS=100
 PRIOR_PATIENCE=8
 PRIOR_MIN_DELTA=1e-3
+PRIOR_LOG_INTERVAL=50
 
 DEFAULT_N=8
 DEFAULT_P=64
@@ -64,7 +65,7 @@ run_prior_train() {
   fi
 
   echo "=== Training prior for P=${patch_size} ==="
-  python train_patch_local_prior.py \
+  python -u train_patch_local_prior.py \
     --real_root "${REAL_ROOT}" \
     --fake_root "${FAKE_ROOT}" \
     --out_dir "${out_dir}" \
@@ -78,7 +79,7 @@ run_prior_train() {
     --max_epochs "${PRIOR_MAX_EPOCHS}" \
     --patience "${PRIOR_PATIENCE}" \
     --min_delta "${PRIOR_MIN_DELTA}" \
-    --log_interval 50 \
+    --log_interval "${PRIOR_LOG_INTERVAL}" \
     "${resume_args[@]}" | tee "${log_path}"
 
   touch "${done_flag}"
@@ -101,7 +102,7 @@ run_eval() {
   fi
 
   echo "=== Evaluating ${run_name} ==="
-  python test_var_convmem.py \
+  python -u test_var_convmem.py \
     --model_path "${MODEL_PATH}" \
     --vae_path "${VAE_PATH}" \
     --data_path "${DATA_PATH}" \
