@@ -61,6 +61,8 @@ parser.add_argument('--demo_only', action='store_true',
                     help='Only generate demo images without calculating FID')
 parser.add_argument('--skip_per_class_fid', action='store_true',
                     help='Skip per-class FID computation while keeping overall FID/KID evaluation')
+parser.add_argument('--real_images_dir', type=str, default='',
+                    help='Optional prebuilt real image directory for FID/KID/LPIPS/SSIM; skip rebuilding temp real dirs')
 parser.add_argument('--enable_learned_local_prior', action='store_true',
                     help='Enable learned patch realism prior reranking during generation')
 parser.add_argument('--local_prior_ckpt', type=str, default='',
@@ -756,19 +758,24 @@ generated_dir = os.path.abspath(os.path.join(args.output_dir, "generated_images_
 import pathlib
 IMAGE_EXTS = {'png', 'jpg', 'jpeg', 'bmp', 'tiff', 'webp'}
 real_dir = os.path.abspath(os.path.join(args.output_dir, "temp_all_real_images"))
-if os.path.exists(real_dir):
-    shutil.rmtree(real_dir)
-os.makedirs(real_dir, exist_ok=True)
-_real_count = 0
-for _split in FID_SPLITS:
-    _split_dir = pathlib.Path(args.data_path) / _split
-    if not _split_dir.exists():
-        continue
-    for _f in _split_dir.rglob('*'):
-        if _f.suffix[1:].lower() in IMAGE_EXTS:
-            _dest = os.path.join(real_dir, f"real_{_real_count:06d}{_f.suffix}")
-            shutil.copy2(str(_f), _dest)
-            _real_count += 1
+if args.real_images_dir:
+    real_dir = os.path.abspath(args.real_images_dir)
+    _real_count = sum(1 for _f in pathlib.Path(real_dir).rglob('*') if _f.suffix[1:].lower() in IMAGE_EXTS)
+    print(f"Using prebuilt real image directory: {real_dir}")
+else:
+    if os.path.exists(real_dir):
+        shutil.rmtree(real_dir)
+    os.makedirs(real_dir, exist_ok=True)
+    _real_count = 0
+    for _split in FID_SPLITS:
+        _split_dir = pathlib.Path(args.data_path) / _split
+        if not _split_dir.exists():
+            continue
+        for _f in _split_dir.rglob('*'):
+            if _f.suffix[1:].lower() in IMAGE_EXTS:
+                _dest = os.path.join(real_dir, f"real_{_real_count:06d}{_f.suffix}")
+                shutil.copy2(str(_f), _dest)
+                _real_count += 1
 print(f"📂 真实图像合并完成: {_real_count} 张 (train+val+test)")
 print(f"📂 生成图像目录（绝对路径）: {generated_dir}")
 print(f"📂 真实图像目录（绝对路径）: {real_dir}")
@@ -919,10 +926,12 @@ else:
         else:
             # 创建临时目录处理中文文件名问题
             print(f"📝 准备真实图像（处理中文文件名）...")
-            temp_real_dir = os.path.join(args.output_dir, "temp_real_images_fid")
-            if os.path.exists(temp_real_dir):
-                shutil.rmtree(temp_real_dir)
-            os.makedirs(temp_real_dir, exist_ok=True)
+            use_prebuilt_real_dir = bool(args.real_images_dir)
+            temp_real_dir = real_dir if use_prebuilt_real_dir else os.path.join(args.output_dir, "temp_real_images_fid")
+            if not use_prebuilt_real_dir:
+                if os.path.exists(temp_real_dir):
+                    shutil.rmtree(temp_real_dir)
+                os.makedirs(temp_real_dir, exist_ok=True)
 
             # 收集所有真实图像
             import pathlib
@@ -933,7 +942,7 @@ else:
 
             # 复制到临时目录（使用数字命名避免中文编码问题）
             import PIL.Image as Image
-            copied_count = 0
+            copied_count = len(all_real_files) if use_prebuilt_real_dir else 0
             target_size = (256, 256)
 
             # 选择与生成图像相同数量的真实图像
