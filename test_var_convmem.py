@@ -946,7 +946,9 @@ else:
             target_size = (256, 256)
 
             # 选择与生成图像相同数量的真实图像
-            if len(all_real_files) > len(generated_images):
+            if use_prebuilt_real_dir:
+                selected_files = []
+            elif len(all_real_files) > len(generated_images):
                 import random
                 random.seed(args.seed)
                 selected_files = random.sample(all_real_files, len(generated_images))
@@ -985,7 +987,8 @@ else:
             print(f"🎯 KID分数: {kid_value:.6f}")
 
             # 清理临时目录
-            shutil.rmtree(temp_real_dir)
+            if not use_prebuilt_real_dir:
+                shutil.rmtree(temp_real_dir)
 
             # 计算每类别FID
             if args.skip_per_class_fid:

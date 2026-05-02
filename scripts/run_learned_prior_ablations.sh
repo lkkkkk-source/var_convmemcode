@@ -9,7 +9,7 @@ export CUDA_VISIBLE_DEVICES=1
 MODEL_PATH="./local_output/fined_v2.2_classaware_rank2_mem8_12/ar-ckpt-last.pth"
 VAE_PATH="./model_path/vae_ch160v4096z32.pth"
 DATA_PATH="./dataset_v3_patches"
-REAL_IMAGES_DIR="./evaluation_results/fined_v2.4_classaware_rank3_mem8_12_best_cfg4.5/temp_all_real_images"
+REAL_IMAGES_DIR="./evaluation_results/learned_prior_ablation_cfg4.5/learnedprior_N1_P64_K2_w1.0_cfg4.5/temp_real_images_fid"
 REAL_ROOT="./evaluation_results/fined_v2.2_classaware_rank2_mem8_12_cfg4.5/temp_all_real_images"
 FAKE_ROOT="./evaluation_results/fined_v2.2_classaware_rank2_mem8_12_cfg4.5/generated_images_for_fid"
 
