@@ -2,6 +2,7 @@ import argparse
 import os
 import os.path as osp
 import random
+import time
 from typing import List, Sequence, Tuple
 
 import numpy as np
@@ -81,7 +82,7 @@ class TorchRandomSampler(Sampler[int]):
         return len(self.data_source)
 
 
-def run_one_epoch(model, loader, criterion, device, optimizer=None):
+def run_one_epoch(model, loader, criterion, device, optimizer=None, epoch_idx=None, max_epochs=None, split_name='train', log_interval=0):
     is_train = optimizer is not None
     if is_train:
         model.train()
@@ -92,7 +93,10 @@ def run_one_epoch(model, loader, criterion, device, optimizer=None):
     total = 0
     correct = 0
 
-    for x, y in loader:
+    num_batches = len(loader)
+    start_time = time.time()
+
+    for batch_idx, (x, y) in enumerate(loader, start=1):
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
 
@@ -109,9 +113,22 @@ def run_one_epoch(model, loader, criterion, device, optimizer=None):
         pred = (torch.sigmoid(logits) > 0.5).float()
         correct += (pred == y).sum().item()
 
+        if log_interval > 0 and (batch_idx % log_interval == 0 or batch_idx == num_batches):
+            elapsed = time.time() - start_time
+            avg_loss_so_far = total_loss / max(total, 1)
+            acc_so_far = correct / max(total, 1)
+            speed = total / max(elapsed, 1e-6)
+            prefix = f'[LocalPrior][ep {epoch_idx}/{max_epochs}]' if epoch_idx is not None and max_epochs is not None else '[LocalPrior]'
+            print(
+                f'{prefix}[{split_name}][batch {batch_idx}/{num_batches}] '
+                f'loss={avg_loss_so_far:.4f}, acc={acc_so_far:.4f}, '
+                f'samples={total}, speed={speed:.1f} samples/s'
+            )
+
     avg_loss = total_loss / max(total, 1)
     acc = correct / max(total, 1)
-    return avg_loss, acc
+    elapsed = time.time() - start_time
+    return avg_loss, acc, elapsed
 
 
 def main():
@@ -129,6 +146,8 @@ def main():
     parser.add_argument('--val_ratio', type=float, default=0.1)
     parser.add_argument('--patience', type=int, default=8)
     parser.add_argument('--min_delta', type=float, default=1e-3)
+    parser.add_argument('--log_interval', type=int, default=50)
+    parser.add_argument('--resume', type=str, default='')
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -169,52 +188,98 @@ def main():
     best_epoch = 0
     bad_epochs = 0
     stop_reason = 'max_epochs_reached'
+    start_epoch = 0
     best_path = osp.join(args.out_dir, 'patch-local-prior-best.pth')
     last_path = osp.join(args.out_dir, 'patch-local-prior-last.pth')
 
-    for ep in range(args.max_epochs):
-        train_loss, train_acc = run_one_epoch(model, train_loader, criterion, device, optimizer=opt)
+    if args.resume:
+        if not osp.isfile(args.resume):
+            raise FileNotFoundError(f'Resume checkpoint not found: {args.resume}')
+        ckpt = torch.load(args.resume, map_location=device)
+        state = ckpt.get('model', ckpt)
+        model.load_state_dict(state, strict=True)
+        opt_state = ckpt.get('optimizer')
+        if opt_state is not None:
+            opt.load_state_dict(opt_state)
+        best_loss = ckpt.get('best_loss', best_loss)
+        best_epoch = ckpt.get('best_epoch', best_epoch)
+        bad_epochs = ckpt.get('bad_epochs', bad_epochs)
+        start_epoch = int(ckpt.get('epoch', 0))
+        print(
+            f'[LocalPrior] resumed from: {args.resume} '
+            f'(start_epoch={start_epoch}, best_loss={best_loss:.4f}, '
+            f'best_epoch={best_epoch}, bad_epochs={bad_epochs})'
+        )
+
+    for ep in range(start_epoch, args.max_epochs):
+        train_loss, train_acc, train_time = run_one_epoch(
+            model, train_loader, criterion, device, optimizer=opt,
+            epoch_idx=ep + 1, max_epochs=args.max_epochs, split_name='train', log_interval=args.log_interval
+        )
         metric_name = 'train_loss'
         metric_value = train_loss
         val_loss = None
         val_acc = None
+        val_time = 0.0
 
         if val_loader is not None:
             with torch.inference_mode():
-                val_loss, val_acc = run_one_epoch(model, val_loader, criterion, device, optimizer=None)
+                val_loss, val_acc, val_time = run_one_epoch(
+                    model, val_loader, criterion, device, optimizer=None,
+                    epoch_idx=ep + 1, max_epochs=args.max_epochs, split_name='val', log_interval=args.log_interval
+                )
             metric_name = 'val_loss'
             metric_value = val_loss
             print(
                 f'[LocalPrior][ep {ep+1}/{args.max_epochs}] '
                 f'train_loss={train_loss:.4f}, train_acc={train_acc:.4f}, '
-                f'val_loss={val_loss:.4f}, val_acc={val_acc:.4f}'
+                f'val_loss={val_loss:.4f}, val_acc={val_acc:.4f}, '
+                f'train_time={train_time:.1f}s, val_time={val_time:.1f}s'
             )
         else:
-            print(f'[LocalPrior][ep {ep+1}/{args.max_epochs}] train_loss={train_loss:.4f}, train_acc={train_acc:.4f}')
+            print(
+                f'[LocalPrior][ep {ep+1}/{args.max_epochs}] '
+                f'train_loss={train_loss:.4f}, train_acc={train_acc:.4f}, train_time={train_time:.1f}s'
+            )
 
         checkpoint = {
             'epoch': ep + 1,
             'model': model.state_dict(),
+            'optimizer': opt.state_dict(),
             'args': vars(args),
             'train_loss': train_loss,
             'train_acc': train_acc,
             'val_loss': val_loss,
             'val_acc': val_acc,
+            'best_loss': best_loss,
+            'best_epoch': best_epoch,
+            'bad_epochs': bad_epochs,
         }
-        torch.save(checkpoint, last_path)
 
         improved = metric_value < (best_loss - args.min_delta)
         if improved:
             best_loss = metric_value
             best_epoch = ep + 1
             bad_epochs = 0
+            checkpoint['best_loss'] = best_loss
+            checkpoint['best_epoch'] = best_epoch
+            checkpoint['bad_epochs'] = bad_epochs
             torch.save(checkpoint, best_path)
+            print(f'[LocalPrior] new best {metric_name}={best_loss:.4f} at epoch {best_epoch}')
         else:
             bad_epochs += 1
+            checkpoint['best_loss'] = best_loss
+            checkpoint['best_epoch'] = best_epoch
+            checkpoint['bad_epochs'] = bad_epochs
+            if val_loader is not None:
+                print(f'[LocalPrior] no improvement: best_{metric_name}={best_loss:.4f} at epoch {best_epoch}, patience_left={args.patience - bad_epochs}')
             if val_loader is not None and bad_epochs >= args.patience:
                 stop_reason = f'early_stopping(patience={args.patience}, best_epoch={best_epoch})'
+                torch.save(checkpoint, last_path)
                 print(f'[LocalPrior] Early stopping triggered at epoch {ep+1}; best {metric_name}={best_loss:.4f} at epoch {best_epoch}')
                 break
+
+        torch.save(checkpoint, last_path)
 
     print(f'[LocalPrior] best saved to: {best_path}')
     print(f'[LocalPrior] last saved to: {last_path}')
