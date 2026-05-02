@@ -201,10 +201,19 @@ def main():
         opt_state = ckpt.get('optimizer')
         if opt_state is not None:
             opt.load_state_dict(opt_state)
-        best_loss = ckpt.get('best_loss', best_loss)
-        best_epoch = ckpt.get('best_epoch', best_epoch)
-        bad_epochs = ckpt.get('bad_epochs', bad_epochs)
         start_epoch = int(ckpt.get('epoch', 0))
+        if 'best_loss' in ckpt:
+            best_loss = ckpt['best_loss']
+            best_epoch = ckpt.get('best_epoch', best_epoch)
+            bad_epochs = ckpt.get('bad_epochs', bad_epochs)
+        else:
+            resume_metric = ckpt.get('val_loss')
+            if resume_metric is None:
+                resume_metric = ckpt.get('train_loss')
+            if resume_metric is not None:
+                best_loss = float(resume_metric)
+                best_epoch = start_epoch
+            bad_epochs = 0
         print(
             f'[LocalPrior] resumed from: {args.resume} '
             f'(start_epoch={start_epoch}, best_loss={best_loss:.4f}, '
