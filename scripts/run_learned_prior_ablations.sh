@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+export CUDA_VISIBLE_DEVICES=1
+
 MODEL_PATH="./local_output/fined_v2.2_classaware_rank2_mem8_12/ar-ckpt-last.pth"
 VAE_PATH="./model_path/vae_ch160v4096z32.pth"
 DATA_PATH="./dataset_v3_patches"
@@ -111,6 +113,7 @@ run_eval() {
     --batch_size "${BATCH_SIZE}" \
     --num_classes "${NUM_CLASSES}" \
     --fid_splits train_val_test \
+    --skip_per_class_fid \
     --output_dir "${out_dir}" \
     --enable_texture \
     --texture_enable_layers 12_13_14_15 \
