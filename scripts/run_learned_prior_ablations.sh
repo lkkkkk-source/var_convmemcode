@@ -12,7 +12,7 @@ FAKE_ROOT="./evaluation_results/fined_v2.2_classaware_rank2_mem8_12_cfg4.5/gener
 
 DEPTH=16
 NUM_SAMPLES=8700
-BATCH_SIZE=32
+BATCH_SIZE=8
 NUM_CLASSES=6
 CFG=4.5
 TOP_K=900
