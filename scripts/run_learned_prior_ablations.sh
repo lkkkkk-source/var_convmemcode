@@ -110,6 +110,7 @@ run_eval() {
     --num_samples "${NUM_SAMPLES}" \
     --batch_size "${BATCH_SIZE}" \
     --num_classes "${NUM_CLASSES}" \
+    --fid_splits train_val_test \
     --output_dir "${out_dir}" \
     --enable_texture \
     --texture_enable_layers 12_13_14_15 \

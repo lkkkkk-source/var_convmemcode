@@ -774,8 +774,6 @@ print(f"📂 生成图像目录（绝对路径）: {generated_dir}")
 print(f"📂 真实图像目录（绝对路径）: {real_dir}")
 
 # 创建生成图像目录
-if os.path.exists(generated_dir):
-    shutil.rmtree(generated_dir)
 os.makedirs(generated_dir, exist_ok=True)
 
 # 生成样本用于FID计算
@@ -800,6 +798,28 @@ generated_counts_by_class = defaultdict(int)
 num_batches = (num_samples_for_fid + batch_size - 1) // batch_size
 sample_count = 0
 current_seed = seed  # 使用连续递增的种子
+
+existing_generated = sorted(glob.glob(os.path.join(generated_dir, "*.png")))
+existing_count = len(existing_generated)
+for existing_path in existing_generated:
+    base_name = os.path.basename(existing_path)
+    if base_name.startswith('class') and len(base_name) >= 8:
+        try:
+            class_id = int(base_name[5:8])
+            generated_images_by_class[class_id].append(existing_path)
+            generated_counts_by_class[class_id] += 1
+        except ValueError:
+            pass
+
+if existing_count >= num_samples_for_fid:
+    print(f"Existing generated images already reach target: {existing_count}; skip regeneration.")
+else:
+    print(f"Existing generated images: {existing_count}; will continue until {num_samples_for_fid}.")
+
+sample_count = existing_count
+current_seed = seed + existing_count * max(args.local_prior_candidates, 1)
+remaining_to_generate = max(num_samples_for_fid - sample_count, 0)
+num_batches = (remaining_to_generate + batch_size - 1) // batch_size if remaining_to_generate > 0 else 0
 
 for batch_idx in range(num_batches):
     current_batch_size = min(batch_size, num_samples_for_fid - sample_count)
