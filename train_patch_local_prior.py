@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 from torchvision import transforms
 
 from models.patch_realism_scorer import PatchRealismScorer
@@ -31,10 +31,8 @@ class PatchBinaryDataset(Dataset):
     def __init__(self, real_paths: List[str], fake_paths: List[str], patch_size: int = 64, image_size: int = 256):
         self.samples: List[Tuple[str, int]] = [(p, 1) for p in real_paths] + [(p, 0) for p in fake_paths]
         self.patch_size = patch_size
-        self.pre = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-        ])
+        self.resize = transforms.Resize((image_size, image_size))
+        self.to_tensor = transforms.PILToTensor()
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -42,7 +40,7 @@ class PatchBinaryDataset(Dataset):
     def __getitem__(self, idx: int):
         path, label = self.samples[idx]
         img = Image.open(path).convert('RGB')
-        x = self.pre(img)
+        x = self.to_tensor(self.resize(img)).float().div_(255.0)
         _, h, w = x.shape
         if h < self.patch_size or w < self.patch_size:
             x = F.interpolate(x.unsqueeze(0), size=(max(h, self.patch_size), max(w, self.patch_size)), mode='bilinear', align_corners=False).squeeze(0)
@@ -64,6 +62,23 @@ def split_paths(paths: Sequence[str], val_ratio: float, rng: random.Random) -> T
     val_count = min(val_count, len(paths) - 1)
     train_count = len(paths) - val_count
     return paths[:train_count], paths[train_count:]
+
+
+class TorchRandomSampler(Sampler[int]):
+    def __init__(self, data_source: Dataset, seed: int = 0):
+        self.data_source = data_source
+        self.seed = seed
+        self.epoch = 0
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        indices = torch.randperm(len(self.data_source), generator=generator).tolist()
+        self.epoch += 1
+        return iter(indices)
+
+    def __len__(self) -> int:
+        return len(self.data_source)
 
 
 def run_one_epoch(model, loader, criterion, device, optimizer=None):
@@ -137,7 +152,8 @@ def main():
 
     train_dataset = PatchBinaryDataset(train_real, train_fake, patch_size=args.patch_size, image_size=args.image_size)
     val_dataset = PatchBinaryDataset(val_real, val_fake, patch_size=args.patch_size, image_size=args.image_size) if val_real and val_fake else None
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True, drop_last=False)
+    train_sampler = TorchRandomSampler(train_dataset, seed=args.seed)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=train_sampler, num_workers=args.workers, pin_memory=True, drop_last=False)
     val_loader = None
     if val_dataset is not None:
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, drop_last=False)
